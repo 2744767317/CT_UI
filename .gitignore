@@ -1,0 +1,94 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+out/
+dist/
+
+# Compiled executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Object files
+*.obj
+*.o
+*.ko
+
+# Compiled Qt translation files
+*.qm
+
+# Qt auto-generated files
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+*.moc
+
+# Qt Creator / Qt Creator settings
+.qtcreator/
+.qtc_clangd/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake.in
+compile_commands.json
+Testing/
+
+# Visual Studio / MSVC
+.vs/
+*.vcxproj*
+!*.filters
+*.sln
+*.suo
+*.user
+*.userprefs
+*.ncb
+*.sdf
+*.aps
+*.lastbuildstate
+*.tlog
+*.recipe
+*.response
+*.ilk
+*.exp
+*.pdb
+*.dbg
+*.map
+*.lib
+*.def
+
+# Qt build artifacts from qmake
+*.pro.user
+*.pro.user.*
+
+# OS generated files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+.DS_Store
+
+# Compressed files
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
