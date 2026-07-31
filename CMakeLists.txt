@@ -20,8 +20,7 @@ add_executable(EOS_UI WIN32
 target_link_libraries(EOS_UI PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
 if (MSVC)
-    target_compile_options(EOS_UI PRIVATE /W4 /permissive-)
+    target_compile_options(EOS_UI PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(EOS_UI PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-

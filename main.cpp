@@ -6,15 +6,14 @@
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    app.setApplicationName("EOS Administration");
-    app.setOrganizationName("EOS Prototype");
+    app.setApplicationName("ORTHO CT Console");
+    app.setOrganizationName("Medical Imaging Systems");
 
     QFont font("Microsoft YaHei UI");
-    font.setPointSize(9);
+    font.setPointSize(10);
     app.setFont(font);
 
     MainWindow window;
     window.showMaximized();
     return app.exec();
 }
-
