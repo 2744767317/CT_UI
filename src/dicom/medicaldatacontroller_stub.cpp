@@ -66,6 +66,17 @@ bool MedicalDataController::importDicom(const QUrl &)
     return false;
 }
 
+void MedicalDataController::importDicomAsync(const QUrl &source)
+{
+    importDicom(source);
+}
+
+bool MedicalDataController::selectSeries(int)
+{
+    setError(QStringLiteral("当前 MinGW 构建未启用 DICOM 序列加载。"));
+    return false;
+}
+
 bool MedicalDataController::exportDicomCopy(const QUrl &)
 {
     setError(QStringLiteral("当前 MinGW 构建未启用 DICOM 导出后端。"));

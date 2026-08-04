@@ -6,7 +6,8 @@
 
 ## 当前能力
 
-- 导入单个 DICOM 文件，或从目录中选择实例最多的 DICOM 序列；
+- 后台递归扫描多层目录，识别 `.dcm` 及无扩展名 DICOM；
+- 按患者、检查和序列展示候选 CT/X 线影像，支持模态筛选与患者搜索；
 - 显示患者、检查、序列、模态、体素尺寸和物理间距；
 - 载入 CT 三维序列和单幅 X 线影像；
 - Axial、Coronal、Sagittal MPR 与 GPU 体绘制；
@@ -77,12 +78,16 @@ out/build/msvc-v143-debug/bin/Debug/CT_UI.exe
 out/build/mingw-ui-debug/bin/CT_UI.exe
 ```
 
-真实 DICOM 集成测试为可选项。将环境变量指向单个序列目录后运行 MSVC 测试，可验证导入、体数据和原始实例副本导出：
+真实 DICOM 集成测试为可选项。既可以测试单个序列目录，也可以测试包含多个患者、CT 序列和 DX 投影的多层目录。测试覆盖递归发现、后台扫描、CT 体数据、无扩展名 DX、患者标签和原始实例副本导出：
 
 ```powershell
 $env:CT_UI_TEST_DICOM_DIR = "E:/path/to/one/dicom/series"
+$env:CT_UI_TEST_LIDC_ROOT = "E:/A/LIDC-IDRI-0001"
+$env:CT_UI_TEST_XRAY_ROOT = "E:/A/X_TEST"
 ctest --preset msvc-v143-debug
 ```
+
+目录中存在多个可加载对象时，程序不会擅自选择切片最多的序列，而是在患者确认页弹出序列选择器。DX/CR 等投摄影像按单个 SOP Instance 加载为二维影像，不会误组装成三维体数据。
 
 ## 开发验收参数
 

@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QUrl>
+#include <QVariantList>
 
 #include <array>
 #include <memory>
@@ -25,6 +26,8 @@ struct MaskSnapshot
     std::array<double, 9> direction {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
     std::vector<unsigned char> pixels;
 };
+
+struct DicomSeriesCandidate;
 
 class MedicalDataController final : public QObject
 {
@@ -50,6 +53,8 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(double windowLevel READ windowLevel WRITE setWindowLevel NOTIFY windowingChanged)
     Q_PROPERTY(int datasetRevision READ datasetRevision NOTIFY dataChanged)
     Q_PROPERTY(int segmentationRevision READ segmentationRevision NOTIFY segmentationChanged)
+    Q_PROPERTY(QVariantList seriesChoices READ seriesChoices NOTIFY seriesChoicesChanged)
+    Q_PROPERTY(int selectedSeriesIndex READ selectedSeriesIndex NOTIFY selectedSeriesIndexChanged)
 
 public:
     explicit MedicalDataController(QObject *parent = nullptr);
@@ -75,11 +80,15 @@ public:
     double windowLevel() const { return m_windowLevel; }
     int datasetRevision() const { return m_datasetRevision; }
     int segmentationRevision() const { return m_segmentationRevision; }
+    QVariantList seriesChoices() const { return m_seriesChoices; }
+    int selectedSeriesIndex() const { return m_selectedSeriesIndex; }
 
     std::shared_ptr<const VolumeSnapshot> volumeSnapshot() const;
     std::shared_ptr<const MaskSnapshot> maskSnapshot() const;
 
     Q_INVOKABLE bool importDicom(const QUrl &source);
+    Q_INVOKABLE void importDicomAsync(const QUrl &source);
+    Q_INVOKABLE bool selectSeries(int index);
     Q_INVOKABLE bool exportDicomCopy(const QUrl &destination);
     Q_INVOKABLE void loadDemoVolume();
     Q_INVOKABLE bool applyThreshold(double lower, double upper);
@@ -99,6 +108,8 @@ signals:
     void windowingChanged();
     void statusChanged();
     void busyChanged();
+    void seriesChoicesChanged();
+    void selectedSeriesIndexChanged();
 
 private:
     void setBusy(bool busy);
@@ -106,11 +117,17 @@ private:
     void installVolume(std::shared_ptr<VolumeSnapshot> snapshot,
                        const QStringList &sourceFiles);
     void resetMetadata();
+    void publishSeriesCandidates(
+        std::vector<std::shared_ptr<DicomSeriesCandidate>> candidates);
+    bool loadSeriesCandidate(int index);
 
     mutable std::mutex m_snapshotMutex;
     std::shared_ptr<VolumeSnapshot> m_volume;
     std::shared_ptr<MaskSnapshot> m_mask;
     QStringList m_sourceFiles;
+    std::vector<std::shared_ptr<DicomSeriesCandidate>> m_seriesCandidates;
+    QVariantList m_seriesChoices;
+    int m_selectedSeriesIndex = -1;
 
     QString m_patientName;
     QString m_patientId;

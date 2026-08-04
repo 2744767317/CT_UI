@@ -181,6 +181,7 @@ qt_add_qml_module(CT_UI
         qml/theme/Theme.qml
         qml/components/ActionButton.qml
         qml/components/StatusPill.qml
+        qml/components/SeriesSelectionDialog.qml
         qml/components/ViewportPane.qml
         qml/pages/PatientPage.qml
         qml/pages/SafetyPage.qml
@@ -245,7 +246,12 @@ if(CT_UI_BUILD_TESTS)
         QT_NO_CAST_TO_ASCII
         CT_ENABLE_MEDICAL_BACKEND=$<BOOL:${CT_ENABLE_MEDICAL_BACKEND}>
     )
-    target_link_libraries(CT_UI_core_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+    target_link_libraries(CT_UI_core_tests PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Concurrent
+        Qt6::Test
+    )
     if(CT_ENABLE_MEDICAL_BACKEND)
         target_link_libraries(CT_UI_core_tests PRIVATE ${ITK_LIBRARIES})
     endif()

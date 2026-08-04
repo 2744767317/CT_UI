@@ -8,6 +8,7 @@ Item {
     signal requestFolderImport()
     signal requestFileImport()
     signal requestDemo()
+    signal requestSeriesSelection()
     signal continueRequested()
 
     ColumnLayout {
@@ -42,7 +43,7 @@ Item {
                     Text { text: "医学数据来源"; color: Theme.text; font.pixelSize: 18; font.weight: Font.DemiBold }
                     Text {
                         Layout.fillWidth: true
-                        text: "支持 DICOM CT 序列目录和单张 DICOM X 线影像。目录导入时自动选择实例数最多的序列。"
+                        text: "递归识别多层 DICOM 目录。发现多个患者、CT 序列或 X 线投影时，将先选择影像再载入。"
                         wrapMode: Text.WordWrap
                         color: Theme.textSecondary
                         font.pixelSize: 14
@@ -79,6 +80,11 @@ Item {
                                 spacing: 8
                                 ActionButton { text: "导入 DICOM 目录"; onClicked: root.requestFolderImport() }
                                 ActionButton { text: "导入单个文件"; onClicked: root.requestFileImport() }
+                                ActionButton {
+                                    text: "选择已发现序列"
+                                    visible: medicalData.seriesChoices.length > 1
+                                    onClicked: root.requestSeriesSelection()
+                                }
                                 ActionButton { text: "载入演示 CT"; onClicked: root.requestDemo() }
                             }
                             Text {

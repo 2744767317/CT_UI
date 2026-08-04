@@ -5,6 +5,7 @@
 #include <QFileInfoList>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QVariantMap>
 #include <QtTest>
 
 #include <algorithm>
@@ -17,6 +18,8 @@ private slots:
     void workflowGuardsFutureSteps();
     void demoVolumeAndThresholdAreAvailable();
     void realDicomRoundTripWhenConfigured();
+    void recursiveLidcRootLoadsCtAndDx();
+    void mixedRootLoadsUnsignedDx();
 };
 
 void CoreTests::workflowGuardsFutureSteps()
@@ -82,6 +85,85 @@ void CoreTests::realDicomRoundTripWhenConfigured()
 #endif
 }
 
-QTEST_APPLESS_MAIN(CoreTests)
+void CoreTests::recursiveLidcRootLoadsCtAndDx()
+{
+#if CT_ENABLE_MEDICAL_BACKEND
+    const QString root = qEnvironmentVariable("CT_UI_TEST_LIDC_ROOT");
+    if (root.isEmpty())
+        QSKIP("Set CT_UI_TEST_LIDC_ROOT to test recursive CT/DX discovery.");
+
+    MedicalDataController data;
+    data.importDicomAsync(QUrl::fromLocalFile(root));
+    QTRY_VERIFY_WITH_TIMEOUT(!data.busy(), 120000);
+    QVERIFY2(data.errorMessage().isEmpty(), qPrintable(data.errorMessage()));
+    QVERIFY(data.seriesChoices().size() >= 3);
+
+    int ctIndex = -1;
+    int dxIndex = -1;
+    for (const QVariant &entry : data.seriesChoices()) {
+        const QVariantMap choice = entry.toMap();
+        if (choice.value(QStringLiteral("modality")) == QStringLiteral("CT"))
+            ctIndex = choice.value(QStringLiteral("index")).toInt();
+        if (choice.value(QStringLiteral("modality")) == QStringLiteral("DX") && dxIndex < 0)
+            dxIndex = choice.value(QStringLiteral("index")).toInt();
+    }
+    QVERIFY(ctIndex >= 0);
+    QVERIFY(dxIndex >= 0);
+
+    QVERIFY2(data.selectSeries(ctIndex), qPrintable(data.errorMessage()));
+    QVERIFY(data.loaded());
+    QVERIFY(data.volumeData());
+    QCOMPARE(data.modality(), QStringLiteral("CT"));
+    QCOMPARE(data.patientId(), QStringLiteral("LIDC-IDRI-0001"));
+
+    QVERIFY2(data.selectSeries(dxIndex), qPrintable(data.errorMessage()));
+    QVERIFY(data.loaded());
+    QVERIFY(!data.volumeData());
+    QCOMPARE(data.modality(), QStringLiteral("DX"));
+    QCOMPARE(data.volumeSnapshot()->dimensions[2], 1);
+#else
+    QSKIP("The MinGW UI compatibility build does not link the medical backend.");
+#endif
+}
+
+void CoreTests::mixedRootLoadsUnsignedDx()
+{
+#if CT_ENABLE_MEDICAL_BACKEND
+    const QString root = qEnvironmentVariable("CT_UI_TEST_XRAY_ROOT");
+    if (root.isEmpty())
+        QSKIP("Set CT_UI_TEST_XRAY_ROOT to test mixed extensionless DICOM media.");
+
+    MedicalDataController data;
+    QVERIFY2(data.importDicom(QUrl::fromLocalFile(root)), qPrintable(data.errorMessage()));
+    QVERIFY(data.seriesChoices().size() >= 14);
+
+    int dxIndex = -1;
+    for (const QVariant &entry : data.seriesChoices()) {
+        const QVariantMap choice = entry.toMap();
+        if (choice.value(QStringLiteral("modality")) == QStringLiteral("DX")) {
+            dxIndex = choice.value(QStringLiteral("index")).toInt();
+            break;
+        }
+    }
+    QVERIFY(dxIndex >= 0);
+    QVERIFY2(data.selectSeries(dxIndex), qPrintable(data.errorMessage()));
+    QVERIFY(data.loaded());
+    QVERIFY(!data.volumeData());
+    QCOMPARE(data.modality(), QStringLiteral("DX"));
+    QVERIFY(data.windowWidth() > 1000.0);
+    QVERIFY(data.volumeSnapshot()->dimensions[0] > 1000);
+    QVERIFY(data.volumeSnapshot()->dimensions[1] > 1000);
+
+    QTemporaryDir exportDirectory;
+    QVERIFY(exportDirectory.isValid());
+    QVERIFY2(data.exportDicomCopy(QUrl::fromLocalFile(exportDirectory.path())),
+             qPrintable(data.errorMessage()));
+    QCOMPARE(QDir(exportDirectory.path()).entryList(QDir::Files).size(), 1);
+#else
+    QSKIP("The MinGW UI compatibility build does not link the medical backend.");
+#endif
+}
+
+QTEST_GUILESS_MAIN(CoreTests)
 
 #include "core_tests.moc"

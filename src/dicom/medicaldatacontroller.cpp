@@ -1,13 +1,19 @@
 #include "medicaldatacontroller.h"
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QSet>
+#include <QVariantMap>
+#include <QFutureWatcher>
+
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <itkBinaryThresholdImageFilter.h>
 #include <itkConnectedThresholdImageFilter.h>
 #include <itkGDCMImageIO.h>
-#include <itkGDCMSeriesFileNames.h>
 #include <itkImage.h>
 #include <itkImageFileReader.h>
 #include <itkImageSeriesReader.h>
@@ -17,11 +23,43 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+
+struct DicomSeriesCandidate
+{
+    struct Instance
+    {
+        QString path;
+        int instanceNumber = 0;
+        double imagePosition = std::numeric_limits<double>::quiet_NaN();
+    };
+
+    QString patientName;
+    QString patientId;
+    QString patientSex;
+    QString patientBirthDate;
+    QString studyDescription;
+    QString studyDate;
+    QString studyUid;
+    QString seriesDescription;
+    QString seriesUid;
+    QString modality;
+    std::vector<Instance> instances;
+    double windowWidth = 0.0;
+    double windowLevel = 0.0;
+    int columns = 0;
+    int rows = 0;
+    int frames = 1;
+    bool projection = false;
+    bool unsignedPixels = false;
+    bool volume = false;
+};
 
 namespace {
 
 using Image3D = itk::Image<short, 3>;
 using Image2D = itk::Image<short, 2>;
+using UnsignedImage2D = itk::Image<unsigned short, 2>;
 using MaskImage = itk::Image<unsigned char, 3>;
 
 QString localPath(const QUrl &url)
@@ -44,6 +82,165 @@ double dicomNumber(const itk::MetaDataDictionary &dictionary, const char *tag, d
     bool ok = false;
     const double result = value.toDouble(&ok);
     return ok ? result : fallback;
+}
+
+int dicomInteger(const itk::MetaDataDictionary &dictionary, const char *tag, int fallback)
+{
+    bool ok = false;
+    const int value = dicomText(dictionary, tag).toInt(&ok);
+    return ok ? value : fallback;
+}
+
+bool isProjectionModality(const QString &modality)
+{
+    static const QSet<QString> projectionModalities {
+        QStringLiteral("CR"), QStringLiteral("DX"), QStringLiteral("MG"),
+        QStringLiteral("RF"), QStringLiteral("XA"), QStringLiteral("XC")
+    };
+    return projectionModalities.contains(modality.toUpper());
+}
+
+struct DicomScanResult
+{
+    std::vector<std::shared_ptr<DicomSeriesCandidate>> candidates;
+    QString error;
+};
+
+DicomScanResult scanDicomDirectory(const QString &path)
+{
+    DicomScanResult result;
+    const QFileInfo sourceInfo(path);
+    if (!sourceInfo.exists()) {
+        result.error = QStringLiteral("所选 DICOM 路径不存在。");
+        return result;
+    }
+
+    try {
+        QStringList candidateFiles;
+        if (sourceInfo.isDir()) {
+            QDirIterator iterator(path, QDir::Files | QDir::Readable,
+                                  QDirIterator::Subdirectories);
+            while (iterator.hasNext())
+                candidateFiles.append(iterator.next());
+        } else {
+            candidateFiles.append(path);
+        }
+
+        QHash<QString, std::shared_ptr<DicomSeriesCandidate>> groupedSeries;
+        for (const QString &filePath : candidateFiles) {
+            const QFileInfo fileInfo(filePath);
+            const QString suffix = fileInfo.suffix().toLower();
+            const QString fileName = fileInfo.fileName().toUpper();
+            if (fileInfo.size() < 132 || suffix == QStringLiteral("zip")
+                || suffix == QStringLiteral("xml") || fileName == QStringLiteral("DICOMDIR")
+                || fileName == QStringLiteral("LOCKFILE") || fileName == QStringLiteral("VERSION")) {
+                continue;
+            }
+
+            try {
+                auto probe = itk::GDCMImageIO::New();
+                const std::string nativeFile = QDir::toNativeSeparators(filePath).toStdString();
+                if (!probe->CanReadFile(nativeFile.c_str()))
+                    continue;
+                probe->SetFileName(nativeFile);
+                probe->ReadImageInformation();
+                if (probe->GetNumberOfDimensions() < 2 || probe->GetDimensions(0) == 0
+                    || probe->GetDimensions(1) == 0) {
+                    continue;
+                }
+
+                const auto &dictionary = probe->GetMetaDataDictionary();
+                const QString modality = dicomText(dictionary, "0008|0060").toUpper();
+                if (modality.isEmpty())
+                    continue;
+
+                const QString patientId = dicomText(dictionary, "0010|0020");
+                const QString studyUid = dicomText(dictionary, "0020|000d");
+                QString seriesUid = dicomText(dictionary, "0020|000e");
+                if (seriesUid.isEmpty())
+                    seriesUid = fileInfo.absolutePath();
+                const bool projection = isProjectionModality(modality);
+                QString groupKey = patientId + QChar(u'|') + studyUid + QChar(u'|') + seriesUid;
+                if (projection) {
+                    QString sopUid = dicomText(dictionary, "0008|0018");
+                    if (sopUid.isEmpty())
+                        sopUid = filePath;
+                    groupKey += QChar(u'|') + sopUid;
+                }
+
+                auto candidate = groupedSeries.value(groupKey);
+                if (!candidate) {
+                    candidate = std::make_shared<DicomSeriesCandidate>();
+                    candidate->patientName = dicomText(dictionary, "0010|0010")
+                                                 .replace(QChar(u'^'), QChar(u' '));
+                    candidate->patientId = patientId;
+                    candidate->patientSex = dicomText(dictionary, "0010|0040");
+                    candidate->patientBirthDate = dicomText(dictionary, "0010|0030");
+                    candidate->studyDescription = dicomText(dictionary, "0008|1030");
+                    candidate->studyDate = dicomText(dictionary, "0008|0020");
+                    candidate->studyUid = studyUid;
+                    candidate->seriesDescription = dicomText(dictionary, "0008|103e");
+                    candidate->seriesUid = seriesUid;
+                    candidate->modality = modality;
+                    candidate->windowWidth = dicomNumber(dictionary, "0028|1051", 0.0);
+                    candidate->windowLevel = dicomNumber(dictionary, "0028|1050", 0.0);
+                    candidate->columns = static_cast<int>(probe->GetDimensions(0));
+                    candidate->rows = static_cast<int>(probe->GetDimensions(1));
+                    candidate->frames = probe->GetNumberOfDimensions() >= 3
+                        ? static_cast<int>(probe->GetDimensions(2)) : 1;
+                    candidate->projection = projection;
+                    candidate->unsignedPixels = dicomInteger(dictionary, "0028|0103", 0) == 0;
+                    groupedSeries.insert(groupKey, candidate);
+                }
+                candidate->instances.push_back({filePath,
+                    dicomInteger(dictionary, "0020|0013", 0),
+                    dicomNumber(dictionary, "0020|0032",
+                                std::numeric_limits<double>::quiet_NaN())});
+            } catch (const itk::ExceptionObject &) {
+                // Vendor folders often contain non-image DICOM metadata files.
+            } catch (const std::exception &) {
+            }
+        }
+
+        if (groupedSeries.isEmpty())
+            throw std::runtime_error("No readable DICOM image instances found recursively");
+
+        for (auto iterator = groupedSeries.cbegin(); iterator != groupedSeries.cend(); ++iterator) {
+            auto candidate = iterator.value();
+            std::sort(candidate->instances.begin(), candidate->instances.end(),
+                      [](const DicomSeriesCandidate::Instance &left,
+                         const DicomSeriesCandidate::Instance &right) {
+                const bool leftHasPosition = std::isfinite(left.imagePosition);
+                const bool rightHasPosition = std::isfinite(right.imagePosition);
+                if (leftHasPosition && rightHasPosition
+                    && !qFuzzyCompare(left.imagePosition + 1.0, right.imagePosition + 1.0))
+                    return left.imagePosition < right.imagePosition;
+                if (left.instanceNumber != right.instanceNumber)
+                    return left.instanceNumber < right.instanceNumber;
+                return left.path < right.path;
+            });
+            candidate->volume = !candidate->projection
+                && (candidate->instances.size() > 1 || candidate->frames > 1);
+            result.candidates.push_back(std::move(candidate));
+        }
+        std::sort(result.candidates.begin(), result.candidates.end(),
+                  [](const auto &left, const auto &right) {
+            if (left->patientId != right->patientId)
+                return left->patientId < right->patientId;
+            if (left->modality != right->modality)
+                return left->modality < right->modality;
+            if (left->seriesDescription != right->seriesDescription)
+                return left->seriesDescription < right->seriesDescription;
+            return left->instances.size() > right->instances.size();
+        });
+    } catch (const itk::ExceptionObject &error) {
+        result.error = QStringLiteral("DICOM 读取失败：%1")
+                           .arg(QString::fromUtf8(error.GetDescription()));
+    } catch (const std::exception &error) {
+        result.error = QStringLiteral("DICOM 读取失败：%1")
+                           .arg(QString::fromUtf8(error.what()));
+    }
+    return result;
 }
 
 std::shared_ptr<VolumeSnapshot> snapshotFrom3D(const Image3D *image)
@@ -86,6 +283,33 @@ std::shared_ptr<VolumeSnapshot> snapshotFrom2D(const Image2D *image)
     };
     const auto count = static_cast<std::size_t>(size[0] * size[1]);
     snapshot->pixels.assign(image->GetBufferPointer(), image->GetBufferPointer() + count);
+    return snapshot;
+}
+
+std::shared_ptr<VolumeSnapshot> snapshotFromUnsigned2D(const UnsignedImage2D *image)
+{
+    auto snapshot = std::make_shared<VolumeSnapshot>();
+    const auto size = image->GetLargestPossibleRegion().GetSize();
+    const auto spacing = image->GetSpacing();
+    const auto origin = image->GetOrigin();
+    const auto direction = image->GetDirection();
+
+    snapshot->dimensions = {static_cast<int>(size[0]), static_cast<int>(size[1]), 1};
+    snapshot->spacing = {spacing[0], spacing[1], 1.0};
+    snapshot->origin = {origin[0], origin[1], 0.0};
+    snapshot->direction = {
+        direction(0, 0), direction(0, 1), 0.0,
+        direction(1, 0), direction(1, 1), 0.0,
+        0.0, 0.0, 1.0
+    };
+
+    const auto count = static_cast<std::size_t>(size[0] * size[1]);
+    snapshot->pixels.resize(count);
+    const auto *source = image->GetBufferPointer();
+    std::transform(source, source + count, snapshot->pixels.begin(),
+                   [](unsigned short value) {
+        return static_cast<short>(static_cast<int>(value) - 32768);
+    });
     return snapshot;
 }
 
@@ -195,76 +419,181 @@ std::shared_ptr<const MaskSnapshot> MedicalDataController::maskSnapshot() const
 
 bool MedicalDataController::importDicom(const QUrl &source)
 {
-    const QString path = QDir::toNativeSeparators(localPath(source));
-    const QFileInfo sourceInfo(path);
-    if (!sourceInfo.exists()) {
-        setError(QStringLiteral("所选 DICOM 路径不存在。"));
+    const QString path = QDir::cleanPath(localPath(source));
+    setBusy(true);
+    m_errorMessage.clear();
+    m_statusMessage = QStringLiteral("正在递归扫描 DICOM 文件和序列…");
+    emit statusChanged();
+
+    const auto result = scanDicomDirectory(path);
+    if (!result.error.isEmpty()) {
+        setBusy(false);
+        setError(result.error);
+        return false;
+    }
+    publishSeriesCandidates(result.candidates);
+    if (m_seriesCandidates.size() == 1)
+        return loadSeriesCandidate(0);
+    m_statusMessage = QStringLiteral("递归扫描完成：发现 %1 个可加载序列或投影，请选择影像。")
+                          .arg(m_seriesCandidates.size());
+    emit statusChanged();
+    setBusy(false);
+    return true;
+}
+
+void MedicalDataController::importDicomAsync(const QUrl &source)
+{
+    if (m_busy)
+        return;
+    const QString path = QDir::cleanPath(localPath(source));
+    setBusy(true);
+    m_statusMessage = QStringLiteral("正在准备扫描医学数据目录…");
+    m_errorMessage.clear();
+    emit statusChanged();
+
+    auto *watcher = new QFutureWatcher<DicomScanResult>(this);
+    connect(watcher, &QFutureWatcher<DicomScanResult>::finished, this,
+            [this, watcher] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        if (!result.error.isEmpty()) {
+            setBusy(false);
+            setError(result.error);
+            return;
+        }
+        publishSeriesCandidates(result.candidates);
+        if (m_seriesCandidates.size() == 1) {
+            loadSeriesCandidate(0);
+            return;
+        }
+        m_statusMessage = QStringLiteral("递归扫描完成：发现 %1 个可加载序列或投影，请选择影像。")
+                              .arg(m_seriesCandidates.size());
+        emit statusChanged();
+        setBusy(false);
+    });
+    watcher->setFuture(QtConcurrent::run([path] { return scanDicomDirectory(path); }));
+}
+
+void MedicalDataController::publishSeriesCandidates(
+    std::vector<std::shared_ptr<DicomSeriesCandidate>> candidates)
+{
+    m_seriesCandidates = std::move(candidates);
+    m_seriesChoices.clear();
+    for (qsizetype index = 0;
+         index < static_cast<qsizetype>(m_seriesCandidates.size()); ++index) {
+        const auto &candidate = m_seriesCandidates[static_cast<std::size_t>(index)];
+        const qsizetype instanceCount = static_cast<qsizetype>(candidate->instances.size());
+        QString description = candidate->seriesDescription;
+        if (description.isEmpty())
+            description = candidate->projection ? QStringLiteral("X 线投影")
+                                                 : QStringLiteral("未命名序列");
+        if (candidate->projection && candidate->instances.front().instanceNumber > 0)
+            description += QStringLiteral(" · 图像 %1")
+                               .arg(candidate->instances.front().instanceNumber);
+
+        QVariantMap choice;
+        choice.insert(QStringLiteral("index"), index);
+        choice.insert(QStringLiteral("patientName"), candidate->patientName);
+        choice.insert(QStringLiteral("patientId"), candidate->patientId);
+        choice.insert(QStringLiteral("modality"), candidate->modality);
+        choice.insert(QStringLiteral("description"), description);
+        choice.insert(QStringLiteral("instanceCount"), instanceCount);
+        choice.insert(QStringLiteral("dimensions"), candidate->volume
+            ? QStringLiteral("%1 × %2 × %3").arg(candidate->columns)
+                  .arg(candidate->rows).arg(instanceCount)
+            : QStringLiteral("%1 × %2").arg(candidate->columns).arg(candidate->rows));
+        choice.insert(QStringLiteral("sourceDirectory"),
+                      QFileInfo(candidate->instances.front().path).absolutePath());
+        m_seriesChoices.append(choice);
+    }
+    m_selectedSeriesIndex = -1;
+    emit seriesChoicesChanged();
+    emit selectedSeriesIndexChanged();
+}
+
+bool MedicalDataController::selectSeries(int index)
+{
+    return loadSeriesCandidate(index);
+}
+
+bool MedicalDataController::loadSeriesCandidate(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_seriesCandidates.size())) {
+        setError(QStringLiteral("所选 DICOM 序列不存在，请重新扫描目录。"));
+        setBusy(false);
         return false;
     }
 
     setBusy(true);
     m_errorMessage.clear();
     emit statusChanged();
+    const auto candidate = m_seriesCandidates[static_cast<std::size_t>(index)];
 
     try {
         auto imageIO = itk::GDCMImageIO::New();
+        const QString firstPath = candidate->instances.front().path;
+        imageIO->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+        imageIO->ReadImageInformation();
+
         std::shared_ptr<VolumeSnapshot> snapshot;
         QStringList sourceFiles;
+        for (const auto &instance : candidate->instances)
+            sourceFiles.append(QDir::toNativeSeparators(instance.path));
 
-        if (sourceInfo.isDir()) {
-            auto names = itk::GDCMSeriesFileNames::New();
-            names->SetUseSeriesDetails(true);
-            names->SetDirectory(path.toStdString());
-            const auto &seriesUids = names->GetSeriesUIDs();
-            if (seriesUids.empty())
-                throw std::runtime_error("No DICOM series found");
-
-            std::vector<std::string> bestSeries;
-            for (const auto &uid : seriesUids) {
-                auto files = names->GetFileNames(uid);
-                if (files.size() > bestSeries.size())
-                    bestSeries = std::move(files);
-            }
-
+        if (candidate->volume && candidate->instances.size() > 1) {
+            std::vector<std::string> files;
+            files.reserve(candidate->instances.size());
+            for (const auto &instance : candidate->instances)
+                files.push_back(QDir::toNativeSeparators(instance.path).toStdString());
             auto reader = itk::ImageSeriesReader<Image3D>::New();
             reader->SetImageIO(imageIO);
-            reader->SetFileNames(bestSeries);
+            reader->SetFileNames(files);
             reader->ForceOrthogonalDirectionOff();
             reader->Update();
             snapshot = snapshotFrom3D(reader->GetOutput());
-            for (const auto &file : bestSeries)
-                sourceFiles.append(QString::fromStdString(file));
+        } else if (imageIO->GetNumberOfDimensions() >= 3
+                   && imageIO->GetDimensions(2) > 1) {
+            auto reader = itk::ImageFileReader<Image3D>::New();
+            reader->SetImageIO(imageIO);
+            reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+            reader->Update();
+            snapshot = snapshotFrom3D(reader->GetOutput());
+        } else if (candidate->projection && candidate->unsignedPixels) {
+            auto reader = itk::ImageFileReader<UnsignedImage2D>::New();
+            reader->SetImageIO(imageIO);
+            reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+            reader->Update();
+            snapshot = snapshotFromUnsigned2D(reader->GetOutput());
         } else {
-            imageIO->SetFileName(path.toStdString());
-            imageIO->ReadImageInformation();
-            if (imageIO->GetNumberOfDimensions() >= 3 && imageIO->GetDimensions(2) > 1) {
-                auto reader = itk::ImageFileReader<Image3D>::New();
-                reader->SetImageIO(imageIO);
-                reader->SetFileName(path.toStdString());
-                reader->Update();
-                snapshot = snapshotFrom3D(reader->GetOutput());
-            } else {
-                auto reader = itk::ImageFileReader<Image2D>::New();
-                reader->SetImageIO(imageIO);
-                reader->SetFileName(path.toStdString());
-                reader->Update();
-                snapshot = snapshotFrom2D(reader->GetOutput());
-            }
-            sourceFiles.append(path);
+            auto reader = itk::ImageFileReader<Image2D>::New();
+            reader->SetImageIO(imageIO);
+            reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+            reader->Update();
+            snapshot = snapshotFrom2D(reader->GetOutput());
         }
 
-        const auto &dictionary = imageIO->GetMetaDataDictionary();
         resetMetadata();
-        m_patientName = dicomText(dictionary, "0010|0010").replace(QChar(u'^'), QChar(u' '));
-        m_patientId = dicomText(dictionary, "0010|0020");
-        m_patientSex = dicomText(dictionary, "0010|0040");
-        m_patientBirthDate = dicomText(dictionary, "0010|0030");
-        m_modality = dicomText(dictionary, "0008|0060");
-        m_studyDescription = dicomText(dictionary, "0008|1030");
-        m_seriesDescription = dicomText(dictionary, "0008|103e");
-        m_studyDate = dicomText(dictionary, "0008|0020");
-        m_windowWidth = dicomNumber(dictionary, "0028|1051", 0.0);
-        m_windowLevel = dicomNumber(dictionary, "0028|1050", 0.0);
+        m_patientName = candidate->patientName.isEmpty() ? QStringLiteral("未提供")
+                                                         : candidate->patientName;
+        m_patientId = candidate->patientId.isEmpty() ? QStringLiteral("未提供")
+                                                     : candidate->patientId;
+        m_patientSex = candidate->patientSex.isEmpty() ? QStringLiteral("--")
+                                                       : candidate->patientSex;
+        m_patientBirthDate = candidate->patientBirthDate.isEmpty() ? QStringLiteral("--")
+                                                                   : candidate->patientBirthDate;
+        m_modality = candidate->modality;
+        m_studyDescription = candidate->studyDescription.isEmpty()
+            ? QStringLiteral("未命名检查") : candidate->studyDescription;
+        m_studyDate = candidate->studyDate.isEmpty() ? QStringLiteral("--")
+                                                     : candidate->studyDate;
+        m_seriesDescription = candidate->seriesDescription.isEmpty()
+            ? (candidate->projection ? QStringLiteral("X 线投影")
+                                     : QStringLiteral("未命名序列"))
+            : candidate->seriesDescription;
+        m_windowWidth = candidate->windowWidth;
+        m_windowLevel = candidate->windowLevel;
+        if (candidate->projection && candidate->unsignedPixels)
+            m_windowLevel -= 32768.0;
 
         if (m_windowWidth <= 0.0 && snapshot && !snapshot->pixels.empty()) {
             const auto range = std::minmax_element(snapshot->pixels.begin(), snapshot->pixels.end());
@@ -272,19 +601,26 @@ bool MedicalDataController::importDicom(const QUrl &source)
             m_windowLevel = (static_cast<double>(*range.second) + *range.first) * 0.5;
         }
 
-        m_sourcePath = QDir::toNativeSeparators(sourceInfo.absoluteFilePath());
+        m_sourcePath = QDir::toNativeSeparators(firstPath);
         installVolume(std::move(snapshot), sourceFiles);
-        m_statusMessage = QStringLiteral("DICOM 已载入并完成像素与标签校验");
+        m_selectedSeriesIndex = index;
+        emit selectedSeriesIndexChanged();
+        m_statusMessage = candidate->projection
+            ? QStringLiteral("DICOM %1 投影已载入并完成像素与标签校验").arg(candidate->modality)
+            : QStringLiteral("DICOM %1 序列已载入：%2 个实例")
+                  .arg(candidate->modality).arg(candidate->instances.size());
         emit windowingChanged();
         emit statusChanged();
         setBusy(false);
         return true;
     } catch (const itk::ExceptionObject &error) {
         setBusy(false);
-        setError(QStringLiteral("DICOM 读取失败：%1").arg(QString::fromUtf8(error.GetDescription())));
+        setError(QStringLiteral("DICOM 像素读取失败：%1")
+                     .arg(QString::fromUtf8(error.GetDescription())));
     } catch (const std::exception &error) {
         setBusy(false);
-        setError(QStringLiteral("DICOM 读取失败：%1").arg(QString::fromUtf8(error.what())));
+        setError(QStringLiteral("DICOM 像素读取失败：%1")
+                     .arg(QString::fromUtf8(error.what())));
     }
     return false;
 }

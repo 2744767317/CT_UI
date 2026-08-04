@@ -27,22 +27,32 @@ ApplicationWindow {
     function importFolder() { importFolderDialog.open() }
     function importFile() { importFileDialog.open() }
     function exportDicom() { exportFolderDialog.open() }
+    function chooseSeries() { seriesDialog.open() }
 
     FolderDialog {
         id: importFolderDialog
         title: "选择 DICOM 序列目录"
-        onAccepted: medicalData.importDicom(selectedFolder)
+        onAccepted: medicalData.importDicomAsync(selectedFolder)
     }
     FileDialog {
         id: importFileDialog
         title: "选择 DICOM 文件"
         nameFilters: ["DICOM files (*.dcm *.dicom)", "All files (*)"]
-        onAccepted: medicalData.importDicom(selectedFile)
+        onAccepted: medicalData.importDicomAsync(selectedFile)
     }
     FolderDialog {
         id: exportFolderDialog
         title: "选择 DICOM 副本导出目录"
         onAccepted: medicalData.exportDicomCopy(selectedFolder)
+    }
+
+    SeriesSelectionDialog { id: seriesDialog }
+    Connections {
+        target: medicalData
+        function onSeriesChoicesChanged() {
+            if (medicalData.seriesChoices.length > 1 && medicalData.selectedSeriesIndex < 0)
+                Qt.callLater(function() { seriesDialog.open() })
+        }
     }
 
     ColumnLayout {
@@ -158,6 +168,7 @@ ApplicationWindow {
             onRequestFolderImport: window.importFolder()
             onRequestFileImport: window.importFile()
             onRequestDemo: medicalData.loadDemoVolume()
+            onRequestSeriesSelection: window.chooseSeries()
             onContinueRequested: workflowController.advance()
         }
     }
@@ -193,7 +204,7 @@ ApplicationWindow {
             anchors.centerIn: parent
             spacing: 12
             BusyIndicator { anchors.horizontalCenter: parent.horizontalCenter; running: true }
-            Text { text: "正在读取和校验医学数据…"; color: Theme.text; font.pixelSize: 16 }
+            Text { text: medicalData.statusMessage; color: Theme.text; font.pixelSize: 16 }
         }
     }
 }

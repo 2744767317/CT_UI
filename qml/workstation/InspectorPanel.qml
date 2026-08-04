@@ -5,6 +5,7 @@ import GuangSuo.CT
 
 Rectangle {
     id: root
+    property bool ctMode: medicalData.modality === "CT"
     property bool mip: false
     property bool showSegmentation: true
     property real cropMinimum: 0.0
@@ -28,8 +29,15 @@ Rectangle {
             Layout.fillWidth: true
             TabButton { text: "查看" }
             TabButton { text: "分割" }
-            TabButton { text: "3D" }
+            TabButton { text: "3D"; enabled: medicalData.volumeData }
             TabButton { text: "导出" }
+        }
+        Connections {
+            target: medicalData
+            function onDataChanged() {
+                if (!medicalData.volumeData && tabs.currentIndex === 2)
+                    tabs.currentIndex = 0
+            }
         }
 
         StackLayout {
@@ -48,25 +56,35 @@ Rectangle {
                     Text { text: "窗宽  " + Math.round(medicalData.windowWidth); color: Theme.textSecondary; font.pixelSize: 13 }
                     Slider {
                         Layout.fillWidth: true
-                        from: 1; to: 3000
+                        from: 1
+                        to: root.ctMode ? 3000 : 65535
                         value: medicalData.windowWidth
                         onMoved: medicalData.windowWidth = value
                     }
                     Text { text: "窗位  " + Math.round(medicalData.windowLevel); color: Theme.textSecondary; font.pixelSize: 13 }
                     Slider {
                         Layout.fillWidth: true
-                        from: -1200; to: 1800
+                        from: root.ctMode ? -1200 : -32768
+                        to: root.ctMode ? 1800 : 32767
                         value: medicalData.windowLevel
                         onMoved: medicalData.windowLevel = value
                     }
                     Text { text: "预设"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
                     ComboBox {
                         Layout.fillWidth: true
-                        model: ["软组织  W400 / L40", "肺窗  W1500 / L-600", "骨窗  W1800 / L400"]
+                        model: root.ctMode
+                            ? ["软组织  W400 / L40", "肺窗  W1500 / L-600", "骨窗  W1800 / L400"]
+                            : ["全动态范围  W65535 / L-1", "高对比  W16000 / L0", "低对比  W32000 / L0"]
                         onActivated: index => {
-                            if (index === 0) { medicalData.windowWidth = 400; medicalData.windowLevel = 40 }
-                            if (index === 1) { medicalData.windowWidth = 1500; medicalData.windowLevel = -600 }
-                            if (index === 2) { medicalData.windowWidth = 1800; medicalData.windowLevel = 400 }
+                            if (root.ctMode) {
+                                if (index === 0) { medicalData.windowWidth = 400; medicalData.windowLevel = 40 }
+                                if (index === 1) { medicalData.windowWidth = 1500; medicalData.windowLevel = -600 }
+                                if (index === 2) { medicalData.windowWidth = 1800; medicalData.windowLevel = 400 }
+                            } else {
+                                if (index === 0) { medicalData.windowWidth = 65535; medicalData.windowLevel = -1 }
+                                if (index === 1) { medicalData.windowWidth = 16000; medicalData.windowLevel = 0 }
+                                if (index === 2) { medicalData.windowWidth = 32000; medicalData.windowLevel = 0 }
+                            }
                         }
                     }
                     Text { text: "图像信息"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
@@ -111,7 +129,7 @@ Rectangle {
                     ActionButton {
                         text: "执行种子生长"
                         Layout.fillWidth: true
-                        enabled: medicalData.loaded && medicalBackendEnabled
+                        enabled: medicalData.volumeData && medicalBackendEnabled
                         onClicked: medicalData.applyRegionGrowing(Number(seedX.text), Number(seedY.text), Number(seedZ.text), Number(growLow.text), Number(growHigh.text))
                     }
                     CheckBox {
