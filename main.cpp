@@ -5,11 +5,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
-#include <QQuickItem>
-#include <QQuickItemGrabResult>
-#include <QQuickWindow>
 #include <QQuickStyle>
-#include <QTimer>
 
 int main(int argc, char *argv[])
 {
@@ -29,8 +25,25 @@ int main(int argc, char *argv[])
     const QStringList arguments = QCoreApplication::arguments();
     if (arguments.contains(QStringLiteral("--demo")))
         medicalData.loadDemoVolume();
-    if (arguments.contains(QStringLiteral("--threshold-demo")))
-        medicalData.applyThreshold(300.0, 2500.0);
+    const qsizetype dicomIndex = arguments.indexOf(QStringLiteral("--dicom"));
+    if (dicomIndex >= 0 && dicomIndex + 1 < arguments.size()) {
+        medicalData.importDicom(QUrl::fromLocalFile(arguments.at(dicomIndex + 1)));
+        if (!medicalData.loaded()) {
+            int fallbackIndex = -1;
+            for (const QVariant &entry : medicalData.seriesChoices()) {
+                const QVariantMap choice = entry.toMap();
+                const int index = choice.value(QStringLiteral("index")).toInt();
+                if (fallbackIndex < 0)
+                    fallbackIndex = index;
+                if (choice.value(QStringLiteral("modality")).toString() == QStringLiteral("CT")) {
+                    fallbackIndex = index;
+                    break;
+                }
+            }
+            if (fallbackIndex >= 0)
+                medicalData.selectSeries(fallbackIndex);
+        }
+    }
     if (arguments.contains(QStringLiteral("--workstation"))) {
         workflow.advance();
         workflow.advance();
@@ -46,29 +59,5 @@ int main(int argc, char *argv[])
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed,
                      &app, [] { QCoreApplication::exit(-1); }, Qt::QueuedConnection);
     engine.loadFromModule(QStringLiteral("GuangSuo.CT"), QStringLiteral("Main"));
-
-    const qsizetype screenshotIndex = arguments.indexOf(QStringLiteral("--screenshot"));
-    if (screenshotIndex >= 0 && screenshotIndex + 1 < arguments.size()) {
-        const QString screenshotPath = arguments.at(screenshotIndex + 1);
-        QTimer::singleShot(3000, &app, [&engine, screenshotPath] {
-            const auto windows = engine.rootObjects();
-            auto *window = windows.isEmpty() ? nullptr : qobject_cast<QQuickWindow *>(windows.constFirst());
-            const auto result = window ? window->contentItem()->grabToImage() : nullptr;
-            if (!result) {
-                qCritical("Unable to save UI screenshot");
-                QCoreApplication::exit(2);
-                return;
-            }
-            QObject::connect(result.data(), &QQuickItemGrabResult::ready, qApp,
-                             [result, screenshotPath] {
-                if (!result->saveToFile(screenshotPath)) {
-                    qCritical("Unable to save UI screenshot");
-                    QCoreApplication::exit(2);
-                    return;
-                }
-                QCoreApplication::exit(0);
-            });
-        });
-    }
     return app.exec();
 }

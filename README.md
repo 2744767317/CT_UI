@@ -40,9 +40,10 @@ Qt Creator 20 自动创建的 `Desktop Qt 6.10.3 MSVC2022 64bit` Kit 当前实�
 
 首次重新打开项目时：
 
-1. 保持构建类型为 `Debug`；
-2. 在“构建/Build”菜单执行“清除 CMake 配置/Clear CMake Configuration”，再重新运行 CMake；
-3. 构建并运行目标 `CT_UI`，程序位于当前构建目录的 `bin/CT_UI.exe`。
+1. 选择 `CT UI - MSVC v143 Debug (Recommended)` CMake Preset；
+2. 保持构建类型为 `Debug`；
+3. 确认构建目录为 `E:/A/CT_UI-build/msvc-v143-debug`；
+4. 构建并运行目标 `CT_UI`。
 
 项目根目录的 `CT UI - MSVC v143 Debug (Recommended)` Preset 仍是发布和 CUDA/RTK 开发基线。它由 Visual Studio 2026 调用 v143 14.44.35207；CUDA 12.8 不支持当前 v145 编译器。只检查 QML 界面时也可将 `CT_ENABLE_MEDICAL_BACKEND=OFF`。
 
@@ -74,8 +75,8 @@ ctest --preset mingw-ui-debug
 程序位置：
 
 ```text
-out/build/msvc-v143-debug/bin/Debug/CT_UI.exe
-out/build/mingw-ui-debug/bin/CT_UI.exe
+E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/CT_UI.exe
+E:/A/CT_UI-build/mingw-ui-debug/artifacts/Debug/bin/CT_UI.exe
 ```
 
 真实 DICOM 集成测试为可选项。既可以测试单个序列目录，也可以测试包含多个患者、CT 序列和 DX 投影的多层目录。测试覆盖递归发现、后台扫描、CT 体数据、无扩展名 DX、患者标签和原始实例副本导出：
@@ -89,13 +90,13 @@ ctest --preset msvc-v143-debug
 
 目录中存在多个可加载对象时，程序不会擅自选择切片最多的序列，而是在患者确认页弹出序列选择器。DX/CR 等投摄影像按单个 SOP Instance 加载为二维影像，不会误组装成三维体数据。
 
-## 开发验收参数
+## 开发启动参数
 
-以下参数用于 UI/渲染回归，不属于临床工作流：
+可直接载入演示数据或指定 DICOM 目录并进入影像工作站：
 
 ```powershell
 CT_UI.exe --demo --workstation
-CT_UI.exe --demo --threshold-demo --workstation --screenshot out/ct-ui.png
+CT_UI.exe --dicom E:/path/to/dicom --workstation
 ```
 
 ## 代码结构
@@ -109,4 +110,4 @@ tests/core_tests.cpp          状态机、演示体、分割和可选真实 DICO
 CMakePresets.json             MSVC 主构建与 MinGW UI 兼容构建
 ```
 
-详细的页面职责、组件映射和后续阶段计划见 [DESIGN_SPEC.md](DESIGN_SPEC.md)。
+详细的页面职责、组件映射和后续阶段计划见 [DESIGN_SPEC.md](DESIGN_SPEC.md)。构建目录、绝对路径和 VTK/ITK/RTK 实际链接关系见 [docs/BUILD_AND_DEPENDENCIES.md](docs/BUILD_AND_DEPENDENCIES.md)。

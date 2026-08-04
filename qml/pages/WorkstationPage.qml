@@ -12,9 +12,23 @@ Item {
     property string toolMode: "浏览"
     property int layoutMode: 0
     property bool mip: false
+    property int volumePreset: MedicalViewport.BonePreset
     property bool showSegmentation: true
+    property bool seedPicking: false
+    property int seedViewType: -1
+    property real seedMarkerX: 0.5
+    property real seedMarkerY: 0.5
+    property real seedSlicePosition: -1.0
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
+
+    function acceptSeed(viewType, normalizedX, normalizedY, slicePosition) {
+        root.seedViewType = viewType
+        root.seedMarkerX = normalizedX
+        root.seedMarkerY = normalizedY
+        root.seedSlicePosition = slicePosition
+        root.seedPicking = false
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -90,6 +104,12 @@ Item {
                     viewColor: Theme.axial
                     toolMode: root.toolMode
                     showSegmentation: root.showSegmentation
+                    seedPicking: root.seedPicking
+                    seedMarkerVisible: root.seedViewType === viewType
+                                       && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
+                    seedMarkerX: root.seedMarkerX
+                    seedMarkerY: root.seedMarkerY
+                    onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
                 }
                 ViewportPane {
                     Layout.fillWidth: true
@@ -102,6 +122,12 @@ Item {
                     viewColor: Theme.coronal
                     toolMode: root.toolMode
                     showSegmentation: root.showSegmentation
+                    seedPicking: root.seedPicking
+                    seedMarkerVisible: root.seedViewType === viewType
+                                       && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
+                    seedMarkerX: root.seedMarkerX
+                    seedMarkerY: root.seedMarkerY
+                    onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
                 }
                 ViewportPane {
                     Layout.fillWidth: true
@@ -114,6 +140,12 @@ Item {
                     viewColor: Theme.sagittal
                     toolMode: root.toolMode
                     showSegmentation: root.showSegmentation
+                    seedPicking: root.seedPicking
+                    seedMarkerVisible: root.seedViewType === viewType
+                                       && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
+                    seedMarkerX: root.seedMarkerX
+                    seedMarkerY: root.seedMarkerY
+                    onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
                 }
                 ViewportPane {
                     Layout.fillWidth: true
@@ -128,6 +160,7 @@ Item {
                     viewColor: Theme.volume
                     toolMode: root.toolMode
                     mip: root.mip
+                    volumePreset: root.volumePreset
                     showSegmentation: root.showSegmentation
                     cropMinimum: root.cropMinimum
                     cropMaximum: root.cropMaximum
@@ -140,10 +173,14 @@ Item {
                 Layout.maximumWidth: 340
                 Layout.fillHeight: true
                 mip: root.mip
+                volumePreset: root.volumePreset
                 showSegmentation: root.showSegmentation
+                seedPicking: root.seedPicking
                 cropMinimum: root.cropMinimum
                 cropMaximum: root.cropMaximum
                 onMipRequested: enabled => root.mip = enabled
+                onVolumePresetRequested: preset => root.volumePreset = preset
+                onSeedPickingRequested: enabled => root.seedPicking = enabled
                 onSegmentationVisibilityRequested: visible => root.showSegmentation = visible
                 onCropRequested: (minimum, maximum) => {
                     root.cropMinimum = minimum

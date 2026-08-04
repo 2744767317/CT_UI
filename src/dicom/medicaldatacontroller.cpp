@@ -751,6 +751,51 @@ bool MedicalDataController::applyThreshold(double lower, double upper)
     }
 }
 
+bool MedicalDataController::setRegionGrowingSeed(int seedX, int seedY, int seedZ)
+{
+    const auto snapshot = volumeSnapshot();
+    if (!snapshot || snapshot->dimensions[2] <= 1
+        || seedX < 0 || seedY < 0 || seedZ < 0
+        || seedX >= snapshot->dimensions[0]
+        || seedY >= snapshot->dimensions[1]
+        || seedZ >= snapshot->dimensions[2]) {
+        setError(QStringLiteral("种子点不在当前 CT 体数据范围内。"));
+        return false;
+    }
+
+    const auto offset = static_cast<std::size_t>(
+        (seedZ * snapshot->dimensions[1] + seedY) * snapshot->dimensions[0] + seedX);
+    m_regionGrowingSeed = {seedX, seedY, seedZ};
+    m_regionGrowingSeedValue = snapshot->pixels[offset];
+    m_regionGrowingSeedValid = true;
+    m_errorMessage.clear();
+    m_statusMessage = QStringLiteral("种子点已选择：IJK (%1, %2, %3)，%4 HU")
+                          .arg(seedX).arg(seedY).arg(seedZ).arg(m_regionGrowingSeedValue);
+    emit regionGrowingSeedChanged();
+    emit statusChanged();
+    return true;
+}
+
+void MedicalDataController::clearRegionGrowingSeed()
+{
+    if (!m_regionGrowingSeedValid)
+        return;
+    m_regionGrowingSeed = {-1, -1, -1};
+    m_regionGrowingSeedValue = 0;
+    m_regionGrowingSeedValid = false;
+    emit regionGrowingSeedChanged();
+}
+
+bool MedicalDataController::applyRegionGrowingFromSeed(double lower, double upper)
+{
+    if (!m_regionGrowingSeedValid) {
+        setError(QStringLiteral("请先在轴状位、冠状位或矢状位切片中选择种子点。"));
+        return false;
+    }
+    return applyRegionGrowing(m_regionGrowingSeed[0], m_regionGrowingSeed[1],
+                              m_regionGrowingSeed[2], lower, upper);
+}
+
 bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
                                                double lower, double upper)
 {
@@ -759,6 +804,15 @@ bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
         || seedX >= snapshot->dimensions[0] || seedY >= snapshot->dimensions[1]
         || seedZ >= snapshot->dimensions[2]) {
         setError(QStringLiteral("区域生长的种子点或阈值范围无效。"));
+        return false;
+    }
+
+    const auto seedOffset = static_cast<std::size_t>(
+        (seedZ * snapshot->dimensions[1] + seedY) * snapshot->dimensions[0] + seedX);
+    const short seedValue = snapshot->pixels[seedOffset];
+    if (seedValue < lower || seedValue > upper) {
+        setError(QStringLiteral("种子点为 %1 HU，不在 %2 至 %3 HU 的生长范围内。")
+                     .arg(seedValue).arg(lower).arg(upper));
         return false;
     }
 
@@ -776,13 +830,21 @@ bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
         filter->SetSeed(seed);
         filter->Update();
 
+        auto mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot);
+        const auto selectedCount = static_cast<qsizetype>(std::count_if(
+            mask->pixels.cbegin(), mask->pixels.cend(),
+            [](unsigned char value) { return value != 0; }));
+        if (selectedCount <= 0) {
+            setError(QStringLiteral("种子生长没有产生有效区域，请重新选择种子点或调整 HU 范围。"));
+            return false;
+        }
         {
             std::lock_guard<std::mutex> guard(m_snapshotMutex);
-            m_mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot);
+            m_mask = std::move(mask);
         }
         ++m_segmentationRevision;
-        m_statusMessage = QStringLiteral("种子生长完成：(%1, %2, %3)")
-                              .arg(seedX).arg(seedY).arg(seedZ);
+        m_statusMessage = QStringLiteral("种子生长完成：IJK (%1, %2, %3)，%4 个体素")
+                              .arg(seedX).arg(seedY).arg(seedZ).arg(selectedCount);
         m_errorMessage.clear();
         emit segmentationChanged();
         emit statusChanged();
@@ -874,8 +936,12 @@ void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapsh
     }
     ++m_datasetRevision;
     ++m_segmentationRevision;
+    m_regionGrowingSeed = {-1, -1, -1};
+    m_regionGrowingSeedValue = 0;
+    m_regionGrowingSeedValid = false;
     emit dataChanged();
     emit segmentationChanged();
+    emit regionGrowingSeedChanged();
 }
 
 void MedicalDataController::resetMetadata()

@@ -57,6 +57,15 @@ void MedicalViewportItem::setMip(bool mip)
     update();
 }
 
+void MedicalViewportItem::setVolumePreset(VolumePreset preset)
+{
+    if (m_volumePreset == preset)
+        return;
+    m_volumePreset = preset;
+    emit volumePresetChanged();
+    update();
+}
+
 void MedicalViewportItem::setShowSegmentation(bool visible)
 {
     if (m_showSegmentation == visible)
@@ -78,6 +87,11 @@ void MedicalViewportItem::setCropMaximum(double value)
     m_cropMaximum = std::clamp(value, m_cropMinimum + 0.01, 1.0);
     emit cropChanged();
     update();
+}
+
+void MedicalViewportItem::pickVoxel(double, double)
+{
+    emit voxelPickFailed(QStringLiteral("MinGW UI 兼容模式不提供医学图像拾取。"));
 }
 
 void MedicalViewportItem::reloadData()

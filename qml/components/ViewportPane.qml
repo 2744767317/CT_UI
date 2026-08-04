@@ -10,13 +10,19 @@ Rectangle {
     property color viewColor: Theme.axial
     property string toolMode: "浏览"
     property bool mip: false
+    property int volumePreset: MedicalViewport.BonePreset
     property bool showSegmentation: true
+    property bool seedPicking: false
+    property bool seedMarkerVisible: false
+    property real seedMarkerX: 0.5
+    property real seedMarkerY: 0.5
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
     property real slicePosition: sliceSlider.value
     property point measureStart: Qt.point(-1, -1)
     property point measureEnd: Qt.point(-1, -1)
     property real measuredDistance: 0.0
+    signal seedSelected(int viewType, real normalizedX, real normalizedY, real slicePosition)
 
     color: Theme.image
     border.width: 1
@@ -31,9 +37,18 @@ Rectangle {
         controller: medicalData
         slicePosition: root.slicePosition
         mip: root.mip
+        volumePreset: root.volumePreset
         showSegmentation: root.showSegmentation
         cropMinimum: root.cropMinimum
         cropMaximum: root.cropMaximum
+        onVoxelPicked: (voxelX, voxelY, voxelZ, hu, normalizedX, normalizedY) => {
+            root.seedSelected(root.viewType, normalizedX, normalizedY, root.slicePosition)
+        }
+        onVoxelPickFailed: message => {
+            pickError.text = message
+            pickError.visible = true
+            pickErrorTimer.restart()
+        }
     }
 
     Rectangle {
@@ -84,9 +99,15 @@ Rectangle {
         id: activeArea
         anchors.fill: parent
         hoverEnabled: true
-        enabled: root.toolMode === "测量" && root.viewType !== MedicalViewport.Volume3D
+        enabled: root.viewType !== MedicalViewport.Volume3D
+                 && (root.seedPicking || root.toolMode === "测量")
         preventStealing: true
+        cursorShape: root.seedPicking ? Qt.CrossCursor : Qt.ArrowCursor
         onPressed: mouse => {
+            if (root.seedPicking) {
+                viewport.pickVoxel(mouse.x, mouse.y)
+                return
+            }
             root.measureStart = Qt.point(mouse.x, mouse.y)
             root.measureEnd = root.measureStart
             measureCanvas.requestPaint()
@@ -102,6 +123,61 @@ Rectangle {
                 measureCanvas.requestPaint()
             }
         }
+    }
+
+    Item {
+        visible: root.seedMarkerVisible && medicalData.regionGrowingSeedValid
+        x: root.seedMarkerX * root.width - width * 0.5
+        y: root.seedMarkerY * root.height - height * 0.5
+        width: 34
+        height: 34
+        z: 5
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 2
+            height: parent.height
+            color: Theme.accent
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: parent.width
+            height: 2
+            color: Theme.accent
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: 10
+            height: 10
+            radius: 5
+            color: "transparent"
+            border.width: 2
+            border.color: Theme.accent
+        }
+    }
+
+    Rectangle {
+        id: pickError
+        visible: false
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, pickErrorText.implicitWidth + 24)
+        height: 36
+        radius: Theme.radius
+        color: "#E61A1F22"
+        border.color: Theme.danger
+        z: 7
+        property alias text: pickErrorText.text
+        Text {
+            id: pickErrorText
+            anchors.centerIn: parent
+            color: Theme.text
+            font.pixelSize: 13
+        }
+    }
+    Timer {
+        id: pickErrorTimer
+        interval: 2500
+        onTriggered: pickError.visible = false
     }
 
     Canvas {

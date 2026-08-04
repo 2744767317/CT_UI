@@ -18,15 +18,14 @@
         "value": "v143,version=14.44.35207",
         "strategy": "set"
       },
-      "binaryDir": "${sourceDir}/out/build/msvc-v143-debug",
+      "binaryDir": "${sourceDir}/../CT_UI-build/msvc-v143-debug",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Debug",
         "CMAKE_PREFIX_PATH": "F:/Qt/6.10.3/msvc2022_64",
         "Qt6_DIR": "F:/Qt/6.10.3/msvc2022_64/lib/cmake/Qt6",
-        "VTK_DIR": "E:/A/GuangSuo/VTK_INSTALL/install_debug/lib/cmake/vtk-9.5",
-        "ITK_DIR": "E:/A/GuangSuo/ITK_INSTALL/install_debug/lib/cmake/ITK-5.4",
-        "CUDAToolkit_ROOT": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8",
+        "CT_MEDICAL_SDK_ROOT": "E:/A/GuangSuo",
         "CT_ENABLE_MEDICAL_BACKEND": "ON",
+        "CT_ENABLE_RTK_BACKEND": "OFF",
         "CT_UI_BUILD_TESTS": "ON"
       }
     },
@@ -34,7 +33,7 @@
       "name": "mingw-ui-debug",
       "displayName": "CT UI - MinGW UI Compatibility",
       "generator": "MinGW Makefiles",
-      "binaryDir": "${sourceDir}/out/build/mingw-ui-debug",
+      "binaryDir": "${sourceDir}/../CT_UI-build/mingw-ui-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_C_COMPILER": "F:/Qt/Tools/mingw1310_64/bin/gcc.exe",

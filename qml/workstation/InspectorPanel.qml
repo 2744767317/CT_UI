@@ -7,10 +7,14 @@ Rectangle {
     id: root
     property bool ctMode: medicalData.modality === "CT"
     property bool mip: false
+    property int volumePreset: MedicalViewport.BonePreset
     property bool showSegmentation: true
+    property bool seedPicking: false
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
     signal mipRequested(bool enabled)
+    signal volumePresetRequested(int preset)
+    signal seedPickingRequested(bool enabled)
     signal segmentationVisibilityRequested(bool visible)
     signal cropRequested(real minimum, real maximum)
     signal requestExport()
@@ -100,45 +104,101 @@ Rectangle {
                     id: segmentationColumn
                     width: parent.width
                     spacing: 10
-                    Text { text: "阈值分割"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
-                    RowLayout {
+                    Text { text: "分割方法"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+                    ComboBox {
+                        id: segmentationMethod
                         Layout.fillWidth: true
-                        TextField { id: thresholdLow; Layout.fillWidth: true; text: "300"; placeholderText: "下限 HU"; validator: DoubleValidator {} }
-                        TextField { id: thresholdHigh; Layout.fillWidth: true; text: "2500"; placeholderText: "上限 HU"; validator: DoubleValidator {} }
+                        model: ["阈值分割", "种子生长"]
                     }
-                    ActionButton {
-                        text: "应用阈值分割"
-                        primary: true
+                    StackLayout {
                         Layout.fillWidth: true
-                        enabled: medicalData.loaded
-                        onClicked: medicalData.applyThreshold(Number(thresholdLow.text), Number(thresholdHigh.text))
+                        currentIndex: segmentationMethod.currentIndex
+
+                        ColumnLayout {
+                            spacing: 10
+                            Text {
+                                Layout.fillWidth: true
+                                text: "选择整个体数据中位于 HU 范围内的体素。"
+                                color: Theme.textSecondary
+                                font.pixelSize: 13
+                                wrapMode: Text.WordWrap
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                TextField { id: thresholdLow; Layout.fillWidth: true; text: "300"; placeholderText: "下限 HU"; validator: DoubleValidator {} }
+                                TextField { id: thresholdHigh; Layout.fillWidth: true; text: "2500"; placeholderText: "上限 HU"; validator: DoubleValidator {} }
+                            }
+                            ActionButton {
+                                text: "应用阈值分割"
+                                primary: true
+                                Layout.fillWidth: true
+                                enabled: medicalData.loaded
+                                onClicked: medicalData.applyThreshold(Number(thresholdLow.text), Number(thresholdHigh.text))
+                            }
+                        }
+
+                        ColumnLayout {
+                            spacing: 10
+                            Text {
+                                Layout.fillWidth: true
+                                text: medicalData.regionGrowingSeedValid
+                                      ? "IJK  " + medicalData.regionGrowingSeedX + ", "
+                                        + medicalData.regionGrowingSeedY + ", "
+                                        + medicalData.regionGrowingSeedZ + "    "
+                                        + medicalData.regionGrowingSeedValue + " HU"
+                                      : "尚未选择种子点"
+                                color: medicalData.regionGrowingSeedValid ? Theme.text : Theme.textMuted
+                                font.pixelSize: 14
+                                font.weight: Font.DemiBold
+                            }
+                            ActionButton {
+                                text: root.seedPicking ? "取消取点" : (medicalData.regionGrowingSeedValid ? "重新选取种子" : "在切片中选取种子")
+                                active: root.seedPicking
+                                Layout.fillWidth: true
+                                enabled: medicalData.volumeData && medicalBackendEnabled
+                                onClicked: root.seedPickingRequested(!root.seedPicking)
+                            }
+                            Text {
+                                visible: root.seedPicking
+                                Layout.fillWidth: true
+                                text: "请在轴状位、冠状位或矢状位目标组织内单击。"
+                                color: Theme.accent
+                                font.pixelSize: 13
+                                wrapMode: Text.WordWrap
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                TextField { id: growLow; Layout.fillWidth: true; text: "-100"; placeholderText: "下限 HU"; validator: DoubleValidator {} }
+                                TextField { id: growHigh; Layout.fillWidth: true; text: "200"; placeholderText: "上限 HU"; validator: DoubleValidator {} }
+                            }
+                            ActionButton {
+                                text: "执行种子生长"
+                                primary: true
+                                Layout.fillWidth: true
+                                enabled: medicalData.regionGrowingSeedValid && medicalBackendEnabled
+                                onClicked: medicalData.applyRegionGrowingFromSeed(Number(growLow.text), Number(growHigh.text))
+                            }
+                            ActionButton {
+                                text: "清除种子点"
+                                Layout.fillWidth: true
+                                enabled: medicalData.regionGrowingSeedValid
+                                onClicked: medicalData.clearRegionGrowingSeed()
+                            }
+                        }
                     }
                     Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
-                    Text { text: "种子生长"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        TextField { id: seedX; Layout.fillWidth: true; text: "96"; placeholderText: "X"; validator: IntValidator { bottom: 0 } }
-                        TextField { id: seedY; Layout.fillWidth: true; text: "96"; placeholderText: "Y"; validator: IntValidator { bottom: 0 } }
-                        TextField { id: seedZ; Layout.fillWidth: true; text: "80"; placeholderText: "Z"; validator: IntValidator { bottom: 0 } }
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        TextField { id: growLow; Layout.fillWidth: true; text: "-100"; placeholderText: "下限"; validator: DoubleValidator {} }
-                        TextField { id: growHigh; Layout.fillWidth: true; text: "200"; placeholderText: "上限"; validator: DoubleValidator {} }
-                    }
-                    ActionButton {
-                        text: "执行种子生长"
-                        Layout.fillWidth: true
-                        enabled: medicalData.volumeData && medicalBackendEnabled
-                        onClicked: medicalData.applyRegionGrowing(Number(seedX.text), Number(seedY.text), Number(seedZ.text), Number(growLow.text), Number(growHigh.text))
-                    }
                     CheckBox {
                         text: "显示分割叠加"
                         checked: root.showSegmentation
                         enabled: medicalData.segmentationAvailable
                         onToggled: root.segmentationVisibilityRequested(checked)
                     }
-                    ActionButton { text: "清除分割"; Layout.fillWidth: true; enabled: medicalData.segmentationAvailable; onClicked: medicalData.clearSegmentation() }
+                    ActionButton {
+                        text: "清除分割结果"
+                        Layout.fillWidth: true
+                        enabled: medicalData.segmentationAvailable
+                        onClicked: medicalData.clearSegmentation()
+                    }
                 }
             }
 
@@ -155,6 +215,23 @@ Rectangle {
                         model: ["体绘制", "最大值投影 MIP"]
                         currentIndex: root.mip ? 1 : 0
                         onActivated: index => root.mipRequested(index === 1)
+                    }
+                    Text { text: "体绘制预设"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+                    ComboBox {
+                        Layout.fillWidth: true
+                        model: ["胸部增强", "骨骼", "肺部", "软组织"]
+                        currentIndex: root.volumePreset
+                        enabled: !root.mip
+                        onActivated: index => root.volumePresetRequested(index)
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: root.mip
+                              ? "MIP 沿观察方向保留最高密度体素。"
+                              : "三维预设使用独立 HU 颜色与透明度曲线，不受二维窗宽窗位影响。"
+                        color: Theme.textSecondary
+                        font.pixelSize: 13
+                        wrapMode: Text.WordWrap
                     }
                     Text { text: "Z 轴裁剪下界  " + Math.round(root.cropMinimum * 100) + "%"; color: Theme.textSecondary; font.pixelSize: 13 }
                     Slider {

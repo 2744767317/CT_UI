@@ -17,6 +17,7 @@ class CoreTests final : public QObject
 private slots:
     void workflowGuardsFutureSteps();
     void demoVolumeAndThresholdAreAvailable();
+    void regionGrowingSeedStateAndValidation();
     void realDicomRoundTripWhenConfigured();
     void recursiveLidcRootLoadsCtAndDx();
     void mixedRootLoadsUnsignedDx();
@@ -55,6 +56,30 @@ void CoreTests::demoVolumeAndThresholdAreAvailable()
     QVERIFY(mask);
     QVERIFY(std::any_of(mask->pixels.cbegin(), mask->pixels.cend(),
                         [](unsigned char value) { return value != 0; }));
+}
+
+void CoreTests::regionGrowingSeedStateAndValidation()
+{
+    MedicalDataController data;
+    QSignalSpy seedSpy(&data, &MedicalDataController::regionGrowingSeedChanged);
+    data.loadDemoVolume();
+    QVERIFY(!data.regionGrowingSeedValid());
+
+    QVERIFY(data.setRegionGrowingSeed(96, 96, 80));
+    QVERIFY(data.regionGrowingSeedValid());
+    QCOMPARE(data.regionGrowingSeedX(), 96);
+    QCOMPARE(data.regionGrowingSeedY(), 96);
+    QCOMPARE(data.regionGrowingSeedZ(), 80);
+    QCOMPARE(data.regionGrowingSeedValue(), 45);
+
+    QVERIFY(!data.applyRegionGrowingFromSeed(-1000.0, -500.0));
+    QVERIFY(data.errorMessage().contains(QStringLiteral("45 HU")));
+    QVERIFY(data.applyRegionGrowingFromSeed(40.0, 60.0));
+    QVERIFY(data.segmentationAvailable());
+
+    data.clearRegionGrowingSeed();
+    QVERIFY(!data.regionGrowingSeedValid());
+    QVERIFY(seedSpy.count() >= 3);
 }
 
 void CoreTests::realDicomRoundTripWhenConfigured()

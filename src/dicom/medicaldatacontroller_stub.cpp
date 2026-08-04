@@ -137,6 +137,46 @@ bool MedicalDataController::applyThreshold(double lower, double upper)
     return true;
 }
 
+bool MedicalDataController::setRegionGrowingSeed(int seedX, int seedY, int seedZ)
+{
+    const auto snapshot = volumeSnapshot();
+    if (!snapshot || snapshot->dimensions[2] <= 1
+        || seedX < 0 || seedY < 0 || seedZ < 0
+        || seedX >= snapshot->dimensions[0]
+        || seedY >= snapshot->dimensions[1]
+        || seedZ >= snapshot->dimensions[2]) {
+        setError(QStringLiteral("种子点不在当前 CT 体数据范围内。"));
+        return false;
+    }
+    const auto offset = static_cast<std::size_t>(
+        (seedZ * snapshot->dimensions[1] + seedY) * snapshot->dimensions[0] + seedX);
+    m_regionGrowingSeed = {seedX, seedY, seedZ};
+    m_regionGrowingSeedValue = snapshot->pixels[offset];
+    m_regionGrowingSeedValid = true;
+    emit regionGrowingSeedChanged();
+    return true;
+}
+
+void MedicalDataController::clearRegionGrowingSeed()
+{
+    if (!m_regionGrowingSeedValid)
+        return;
+    m_regionGrowingSeed = {-1, -1, -1};
+    m_regionGrowingSeedValue = 0;
+    m_regionGrowingSeedValid = false;
+    emit regionGrowingSeedChanged();
+}
+
+bool MedicalDataController::applyRegionGrowingFromSeed(double lower, double upper)
+{
+    if (!m_regionGrowingSeedValid) {
+        setError(QStringLiteral("请先在切片中选择种子点。"));
+        return false;
+    }
+    return applyRegionGrowing(m_regionGrowingSeed[0], m_regionGrowingSeed[1],
+                              m_regionGrowingSeed[2], lower, upper);
+}
+
 bool MedicalDataController::applyRegionGrowing(int, int, int, double, double)
 {
     setError(QStringLiteral("MinGW UI 模式不提供 ITK 种子生长。"));
@@ -211,8 +251,12 @@ void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapsh
     }
     ++m_datasetRevision;
     ++m_segmentationRevision;
+    m_regionGrowingSeed = {-1, -1, -1};
+    m_regionGrowingSeedValue = 0;
+    m_regionGrowingSeedValid = false;
     emit dataChanged();
     emit segmentationChanged();
+    emit regionGrowingSeedChanged();
 }
 
 void MedicalDataController::resetMetadata()
