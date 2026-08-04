@@ -71,7 +71,9 @@ QML 不持有 ITK/VTK 对象。C++ 将体数据和掩膜转换为只读快照，
 
 ## 6. 构建策略
 
-MSVC 是完整后端的推荐和发布基线。仓库预设选择 v143 14.44，以兼容当前 VTK/ITK 包及 CUDA 12.8。CMake 不禁止其他 64 位 MSVC 工具集，但会提示它们尚未在当前依赖组合上验证。
+MSVC v143 是完整后端的发布基线。仓库预设选择 v143 14.44，以兼容当前 Qt、VTK/ITK 包及 CUDA 12.8。Qt Creator 默认 Kit 的 v145 14.50 已通过当前 DICOM、ITK 分割和 VTK/QML 运行验证，可用于本阶段开发；后续启用 CUDA 12.8/RTK GPU 路径时必须切回 v143。
+
+Qt Creator 普通 Kit 不会自动继承 Preset 的包路径。CMake 在本机默认从 `E:/A/GuangSuo/VTK_INSTALL/install_debug` 和 `E:/A/GuangSuo/ITK_INSTALL/install_debug` 定位配置文件，并允许通过 `CT_VTK_INSTALL_DIR`、`CT_ITK_INSTALL_DIR` 或 `VTK_DIR`、`ITK_DIR` 覆盖。构建后从 `TARGET_RUNTIME_DLLS` 中筛选并复制 VTK/ITK 传递 DLL，避免运行配置依赖全局医学库 `PATH`；Qt DLL 和插件仍由 Qt Creator Kit 管理，独立发布使用 `windeployqt`。
 
 MinGW 使用相同 QML 文件和控制器接口，当前关闭 `CT_ENABLE_MEDICAL_BACKEND`。这是 ABI 限制，不是 UI 分叉。未来提供 MinGW 编译的 VTK/ITK/RTK 后，可在该预设中打开完整后端。
 

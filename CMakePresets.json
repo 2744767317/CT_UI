@@ -8,7 +8,7 @@
   "configurePresets": [
     {
       "name": "msvc-v143-debug",
-      "displayName": "CT UI - MSVC v143 Debug",
+      "displayName": "CT UI - MSVC v143 Debug (Recommended)",
       "generator": "Visual Studio 18 2026",
       "architecture": {
         "value": "x64",
