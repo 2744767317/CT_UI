@@ -25,6 +25,10 @@
 #include <limits>
 #include <stdexcept>
 
+#ifdef Q_OS_WIN
+#include <Windows.h>
+#endif
+
 struct DicomSeriesCandidate
 {
     struct Instance
@@ -44,6 +48,15 @@ struct DicomSeriesCandidate
     QString seriesDescription;
     QString seriesUid;
     QString modality;
+    QString sopClassUid;
+    QString sopClassName;
+    QString imageType;
+    QString patientOrientation;
+    QString projectionViewKey;
+    QString projectionViewLabel;
+    QString photometricInterpretation;
+    QString presentationLutShape;
+    QString projectionVariant;
     std::vector<Instance> instances;
     double windowWidth = 0.0;
     double windowLevel = 0.0;
@@ -53,6 +66,37 @@ struct DicomSeriesCandidate
     bool projection = false;
     bool unsignedPixels = false;
     bool volume = false;
+};
+
+struct LoadedVolumeNode
+{
+    QString id;
+    QString name;
+    QString patientName;
+    QString patientId;
+    QString patientSex;
+    QString patientBirthDate;
+    QString modality;
+    QString studyDescription;
+    QString studyDate;
+    QString projectionViewLabel;
+    QString projectionPairViewLabel;
+    QString patientOrientation;
+    QString projectionPairOrientation;
+    QString imageType;
+    QString sopClassName;
+    QString projectionPairImageType;
+    QString projectionPairSopClassName;
+    QString sourcePath;
+    QStringList sourceFiles;
+    QStringList pairSourceFiles;
+    std::shared_ptr<VolumeSnapshot> volume;
+    std::shared_ptr<VolumeSnapshot> projectionPair;
+    std::shared_ptr<MaskSnapshot> mask;
+    double windowWidth = 400.0;
+    double windowLevel = 40.0;
+    bool projectionUnsigned = false;
+    bool visible = true;
 };
 
 namespace {
@@ -67,12 +111,77 @@ QString localPath(const QUrl &url)
     return url.isLocalFile() ? url.toLocalFile() : url.toString();
 }
 
+QString decodeDicomBytes(const std::string &value, const QString &characterSet)
+{
+#ifdef Q_OS_WIN
+    if (characterSet.contains(QStringLiteral("GB18030"), Qt::CaseInsensitive)) {
+        const int sourceLength = static_cast<int>(value.size());
+        const int required = MultiByteToWideChar(54936, 0, value.data(), sourceLength,
+                                                  nullptr, 0);
+        if (required > 0) {
+            QString decoded;
+            decoded.resize(required);
+            MultiByteToWideChar(54936, 0, value.data(), sourceLength,
+                                reinterpret_cast<LPWSTR>(decoded.data()), required);
+            return decoded.trimmed();
+        }
+    }
+#else
+    Q_UNUSED(characterSet)
+#endif
+    return QString::fromUtf8(value.data(), static_cast<int>(value.size())).trimmed();
+}
+
 QString dicomText(const itk::MetaDataDictionary &dictionary, const char *tag)
 {
     std::string value;
     if (!itk::ExposeMetaData<std::string>(dictionary, tag, value))
         return {};
-    return QString::fromStdString(value).trimmed();
+    std::string characterSetValue;
+    itk::ExposeMetaData<std::string>(dictionary, "0008|0005", characterSetValue);
+    const QString characterSet = QString::fromLatin1(characterSetValue.data(),
+                                                       static_cast<int>(characterSetValue.size()));
+    return decodeDicomBytes(value, characterSet);
+}
+
+QString sopClassLabel(const QString &uid)
+{
+    if (uid == QStringLiteral("1.2.840.10008.5.1.4.1.1.1"))
+        return QStringLiteral("Digital X-Ray Image Storage");
+    if (uid == QStringLiteral("1.2.840.10008.5.1.4.1.1.1.1"))
+        return QStringLiteral("Digital X-Ray Image Storage - For Presentation");
+    if (uid == QStringLiteral("1.2.840.10008.5.1.4.1.1.7"))
+        return QStringLiteral("Secondary Capture Image Storage");
+    if (uid == QStringLiteral("1.2.840.10008.5.1.4.1.1.2"))
+        return QStringLiteral("CT Image Storage");
+    return uid.isEmpty() ? QStringLiteral("未知 SOP Class") : uid;
+}
+
+QString projectionViewKeyFor(const QString &imageType, const QString &orientation)
+{
+    const QString type = imageType.toUpper();
+    if (type.contains(QStringLiteral("BIPLANE A")))
+        return QStringLiteral("frontal");
+    if (type.contains(QStringLiteral("BIPLANE B")))
+        return QStringLiteral("lateral");
+
+    const QStringList values = orientation.toUpper().split(QChar(u'\\'));
+    if (!values.isEmpty() && (values.front() == QStringLiteral("L")
+                              || values.front() == QStringLiteral("R")))
+        return QStringLiteral("frontal");
+    if (!values.isEmpty() && (values.front() == QStringLiteral("A")
+                              || values.front() == QStringLiteral("P")))
+        return QStringLiteral("lateral");
+    return QStringLiteral("unknown");
+}
+
+QString projectionViewLabelFor(const QString &key)
+{
+    if (key == QStringLiteral("frontal"))
+        return QStringLiteral("正位 / Frontal");
+    if (key == QStringLiteral("lateral"))
+        return QStringLiteral("侧位 / Lateral");
+    return QStringLiteral("投影 / Projection");
 }
 
 double dicomNumber(const itk::MetaDataDictionary &dictionary, const char *tag, double fallback)
@@ -182,6 +291,21 @@ DicomScanResult scanDicomDirectory(const QString &path)
                     candidate->seriesDescription = dicomText(dictionary, "0008|103e");
                     candidate->seriesUid = seriesUid;
                     candidate->modality = modality;
+                    candidate->sopClassUid = dicomText(dictionary, "0008|0016");
+                    candidate->sopClassName = sopClassLabel(candidate->sopClassUid);
+                    candidate->imageType = dicomText(dictionary, "0008|0008");
+                    candidate->patientOrientation = dicomText(dictionary, "0020|0020");
+                    candidate->projectionViewKey = projection
+                        ? projectionViewKeyFor(candidate->imageType,
+                                               candidate->patientOrientation)
+                        : QStringLiteral("volume");
+                    candidate->projectionViewLabel = projectionViewLabelFor(
+                        candidate->projectionViewKey);
+                    candidate->photometricInterpretation = dicomText(dictionary, "0028|0004");
+                    candidate->presentationLutShape = dicomText(dictionary, "2050|0020");
+                    candidate->projectionVariant = candidate->imageType.toUpper().contains(
+                        QStringLiteral("DERIVED")) ? QStringLiteral("derived")
+                                                     : QStringLiteral("original");
                     candidate->windowWidth = dicomNumber(dictionary, "0028|1051", 0.0);
                     candidate->windowLevel = dicomNumber(dictionary, "0028|1050", 0.0);
                     candidate->columns = static_cast<int>(probe->GetDimensions(0));
@@ -313,6 +437,104 @@ std::shared_ptr<VolumeSnapshot> snapshotFromUnsigned2D(const UnsignedImage2D *im
     return snapshot;
 }
 
+std::shared_ptr<VolumeSnapshot> readCandidateSnapshot(
+    const DicomSeriesCandidate &candidate, QStringList *sourceFiles)
+{
+    auto imageIO = itk::GDCMImageIO::New();
+    const QString firstPath = candidate.instances.front().path;
+    imageIO->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+    imageIO->ReadImageInformation();
+
+    if (sourceFiles) {
+        sourceFiles->clear();
+        for (const auto &instance : candidate.instances)
+            sourceFiles->append(QDir::toNativeSeparators(instance.path));
+    }
+
+    if (candidate.volume && candidate.instances.size() > 1) {
+        std::vector<std::string> files;
+        files.reserve(candidate.instances.size());
+        for (const auto &instance : candidate.instances)
+            files.push_back(QDir::toNativeSeparators(instance.path).toStdString());
+        auto reader = itk::ImageSeriesReader<Image3D>::New();
+        reader->SetImageIO(imageIO);
+        reader->SetFileNames(files);
+        reader->ForceOrthogonalDirectionOff();
+        reader->Update();
+        return snapshotFrom3D(reader->GetOutput());
+    }
+    if (imageIO->GetNumberOfDimensions() >= 3 && imageIO->GetDimensions(2) > 1) {
+        auto reader = itk::ImageFileReader<Image3D>::New();
+        reader->SetImageIO(imageIO);
+        reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+        reader->Update();
+        return snapshotFrom3D(reader->GetOutput());
+    }
+    if (candidate.projection && candidate.unsignedPixels) {
+        auto reader = itk::ImageFileReader<UnsignedImage2D>::New();
+        reader->SetImageIO(imageIO);
+        reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+        reader->Update();
+        return snapshotFromUnsigned2D(reader->GetOutput());
+    }
+
+    auto reader = itk::ImageFileReader<Image2D>::New();
+    reader->SetImageIO(imageIO);
+    reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
+    reader->Update();
+    return snapshotFrom2D(reader->GetOutput());
+}
+
+void applyProjectionPhotometric(VolumeSnapshot &snapshot,
+                                const DicomSeriesCandidate &candidate)
+{
+    if (!candidate.projection || snapshot.pixels.empty())
+        return;
+    const bool inversePhotometric = candidate.photometricInterpretation
+        .trimmed().compare(QStringLiteral("MONOCHROME1"), Qt::CaseInsensitive) == 0;
+    const bool inversePresentation = candidate.presentationLutShape
+        .trimmed().compare(QStringLiteral("INVERSE"), Qt::CaseInsensitive) == 0;
+    if (!inversePhotometric && !inversePresentation)
+        return;
+    for (short &value : snapshot.pixels)
+        value = static_cast<short>(32767 - static_cast<int>(value));
+}
+
+int projectionPairIndex(const std::vector<std::shared_ptr<DicomSeriesCandidate>> &candidates,
+                        int selectedIndex)
+{
+    if (selectedIndex < 0 || selectedIndex >= static_cast<int>(candidates.size()))
+        return -1;
+    const auto &selected = candidates[static_cast<std::size_t>(selectedIndex)];
+    if (!selected->projection || selected->projectionViewKey == QStringLiteral("unknown"))
+        return -1;
+
+    int bestIndex = -1;
+    int bestScore = -1;
+    for (int index = 0; index < static_cast<int>(candidates.size()); ++index) {
+        if (index == selectedIndex)
+            continue;
+        const auto &candidate = candidates[static_cast<std::size_t>(index)];
+        if (!candidate->projection || candidate->projectionViewKey == selected->projectionViewKey
+            || candidate->projectionViewKey == QStringLiteral("unknown"))
+            continue;
+        if (candidate->patientId != selected->patientId
+            || candidate->studyUid != selected->studyUid
+            || candidate->projectionVariant != selected->projectionVariant)
+            continue;
+        const bool sameSeries = candidate->seriesUid == selected->seriesUid;
+        const bool sameDescription = !candidate->seriesDescription.isEmpty()
+            && candidate->seriesDescription == selected->seriesDescription;
+        const int score = (sameSeries ? 4 : 0) + (sameDescription ? 2 : 0)
+            + (candidate->sopClassUid == selected->sopClassUid ? 1 : 0);
+        if (score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+        }
+    }
+    return bestIndex;
+}
+
 Image3D::Pointer itkImageFromSnapshot(const VolumeSnapshot &snapshot)
 {
     auto image = Image3D::New();
@@ -377,6 +599,19 @@ bool MedicalDataController::volumeData() const
     return m_volume && m_volume->dimensions[2] > 1;
 }
 
+bool MedicalDataController::projectionData() const
+{
+    std::lock_guard<std::mutex> guard(m_snapshotMutex);
+    return m_volume && !m_volume->pixels.empty() && m_volume->dimensions[2] == 1
+        && m_modality != QStringLiteral("CT");
+}
+
+bool MedicalDataController::pairedProjectionAvailable() const
+{
+    std::lock_guard<std::mutex> guard(m_snapshotMutex);
+    return m_projectionPair && !m_projectionPair->pixels.empty();
+}
+
 bool MedicalDataController::segmentationAvailable() const
 {
     std::lock_guard<std::mutex> guard(m_snapshotMutex);
@@ -411,10 +646,124 @@ std::shared_ptr<const VolumeSnapshot> MedicalDataController::volumeSnapshot() co
     return m_volume;
 }
 
+std::shared_ptr<const VolumeSnapshot> MedicalDataController::projectionPairSnapshot() const
+{
+    std::lock_guard<std::mutex> guard(m_snapshotMutex);
+    return m_projectionPair;
+}
+
+double MedicalDataController::displayWindowLevel() const
+{
+    return m_projectionUnsigned ? m_windowLevel + 32768.0 : m_windowLevel;
+}
+
 std::shared_ptr<const MaskSnapshot> MedicalDataController::maskSnapshot() const
 {
     std::lock_guard<std::mutex> guard(m_snapshotMutex);
     return m_mask;
+}
+
+QVariantList MedicalDataController::volumeNodes() const
+{
+    QVariantList result;
+    result.reserve(static_cast<qsizetype>(m_volumeNodes.size()));
+    for (qsizetype index = 0; index < static_cast<qsizetype>(m_volumeNodes.size()); ++index) {
+        const auto &node = m_volumeNodes[static_cast<std::size_t>(index)];
+        QVariantMap item;
+        item.insert(QStringLiteral("index"), index);
+        item.insert(QStringLiteral("id"), node->id);
+        item.insert(QStringLiteral("name"), node->name);
+        item.insert(QStringLiteral("patientName"), node->patientName);
+        item.insert(QStringLiteral("patientId"), node->patientId);
+        item.insert(QStringLiteral("modality"), node->modality);
+        item.insert(QStringLiteral("visible"), node->visible);
+        item.insert(QStringLiteral("active"), index == m_selectedVolumeIndex);
+        item.insert(QStringLiteral("projection"), node->volume
+            && node->volume->dimensions[2] == 1 && node->modality != QStringLiteral("CT"));
+        item.insert(QStringLiteral("pairedProjection"), node->projectionPair != nullptr);
+        item.insert(QStringLiteral("segmentation"), node->mask != nullptr);
+        item.insert(QStringLiteral("dimensions"), node->volume
+            ? QStringLiteral("%1 x %2 x %3").arg(node->volume->dimensions[0])
+                  .arg(node->volume->dimensions[1]).arg(node->volume->dimensions[2])
+            : QStringLiteral("--"));
+        result.append(item);
+    }
+    return result;
+}
+
+bool MedicalDataController::activeVolumeVisible() const
+{
+    return m_selectedVolumeIndex >= 0
+        && m_selectedVolumeIndex < static_cast<int>(m_volumeNodes.size())
+        && m_volumeNodes[static_cast<std::size_t>(m_selectedVolumeIndex)]->visible;
+}
+
+bool MedicalDataController::selectVolume(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_volumeNodes.size())) {
+        setError(QStringLiteral("所选 Volume 不存在。"));
+        return false;
+    }
+    if (index == m_selectedVolumeIndex)
+        return true;
+    updateActiveVolumeNode();
+    activateVolumeNode(index);
+    return true;
+}
+
+bool MedicalDataController::renameVolume(int index, const QString &name)
+{
+    const QString trimmed = name.trimmed();
+    if (index < 0 || index >= static_cast<int>(m_volumeNodes.size()) || trimmed.isEmpty()) {
+        setError(QStringLiteral("Volume 名称不能为空。"));
+        return false;
+    }
+    auto &node = m_volumeNodes[static_cast<std::size_t>(index)];
+    if (node->name == trimmed)
+        return true;
+    node->name = trimmed;
+    if (index == m_selectedVolumeIndex) {
+        m_seriesDescription = trimmed;
+        emit dataChanged();
+    }
+    emit volumeNodesChanged();
+    return true;
+}
+
+bool MedicalDataController::removeVolume(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_volumeNodes.size())) {
+        setError(QStringLiteral("所选 Volume 不存在。"));
+        return false;
+    }
+    const bool removingActive = index == m_selectedVolumeIndex;
+    m_volumeNodes.erase(m_volumeNodes.begin() + index);
+    if (m_volumeNodes.empty()) {
+        clearActiveVolume();
+    } else if (removingActive) {
+        activateVolumeNode(std::min(index, static_cast<int>(m_volumeNodes.size()) - 1));
+    } else {
+        if (index < m_selectedVolumeIndex)
+            --m_selectedVolumeIndex;
+        emit volumeNodesChanged();
+    }
+    return true;
+}
+
+bool MedicalDataController::setVolumeVisibility(int index, bool visible)
+{
+    if (index < 0 || index >= static_cast<int>(m_volumeNodes.size())) {
+        setError(QStringLiteral("所选 Volume 不存在。"));
+        return false;
+    }
+    auto &node = m_volumeNodes[static_cast<std::size_t>(index)];
+    if (node->visible == visible)
+        return true;
+    node->visible = visible;
+    emit volumeNodesChanged();
+    if (index == m_selectedVolumeIndex)
+        emit dataChanged();
+    return true;
 }
 
 bool MedicalDataController::importDicom(const QUrl &source)
@@ -497,6 +846,10 @@ void MedicalDataController::publishSeriesCandidates(
         choice.insert(QStringLiteral("patientId"), candidate->patientId);
         choice.insert(QStringLiteral("modality"), candidate->modality);
         choice.insert(QStringLiteral("description"), description);
+        choice.insert(QStringLiteral("viewLabel"), candidate->projectionViewLabel);
+        choice.insert(QStringLiteral("orientation"), candidate->patientOrientation);
+        choice.insert(QStringLiteral("sopClass"), candidate->sopClassName);
+        choice.insert(QStringLiteral("imageType"), candidate->imageType);
         choice.insert(QStringLiteral("instanceCount"), instanceCount);
         choice.insert(QStringLiteral("dimensions"), candidate->volume
             ? QStringLiteral("%1 × %2 × %3").arg(candidate->columns)
@@ -530,46 +883,22 @@ bool MedicalDataController::loadSeriesCandidate(int index)
     const auto candidate = m_seriesCandidates[static_cast<std::size_t>(index)];
 
     try {
-        auto imageIO = itk::GDCMImageIO::New();
         const QString firstPath = candidate->instances.front().path;
-        imageIO->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
-        imageIO->ReadImageInformation();
-
         std::shared_ptr<VolumeSnapshot> snapshot;
         QStringList sourceFiles;
-        for (const auto &instance : candidate->instances)
-            sourceFiles.append(QDir::toNativeSeparators(instance.path));
+        snapshot = readCandidateSnapshot(*candidate, &sourceFiles);
+        if (snapshot)
+            applyProjectionPhotometric(*snapshot, *candidate);
 
-        if (candidate->volume && candidate->instances.size() > 1) {
-            std::vector<std::string> files;
-            files.reserve(candidate->instances.size());
-            for (const auto &instance : candidate->instances)
-                files.push_back(QDir::toNativeSeparators(instance.path).toStdString());
-            auto reader = itk::ImageSeriesReader<Image3D>::New();
-            reader->SetImageIO(imageIO);
-            reader->SetFileNames(files);
-            reader->ForceOrthogonalDirectionOff();
-            reader->Update();
-            snapshot = snapshotFrom3D(reader->GetOutput());
-        } else if (imageIO->GetNumberOfDimensions() >= 3
-                   && imageIO->GetDimensions(2) > 1) {
-            auto reader = itk::ImageFileReader<Image3D>::New();
-            reader->SetImageIO(imageIO);
-            reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
-            reader->Update();
-            snapshot = snapshotFrom3D(reader->GetOutput());
-        } else if (candidate->projection && candidate->unsignedPixels) {
-            auto reader = itk::ImageFileReader<UnsignedImage2D>::New();
-            reader->SetImageIO(imageIO);
-            reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
-            reader->Update();
-            snapshot = snapshotFromUnsigned2D(reader->GetOutput());
-        } else {
-            auto reader = itk::ImageFileReader<Image2D>::New();
-            reader->SetImageIO(imageIO);
-            reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
-            reader->Update();
-            snapshot = snapshotFrom2D(reader->GetOutput());
+        const int pairIndex = projectionPairIndex(m_seriesCandidates, index);
+        std::shared_ptr<VolumeSnapshot> pairSnapshot;
+        QStringList pairSourceFiles;
+        std::shared_ptr<DicomSeriesCandidate> pairCandidate;
+        if (pairIndex >= 0) {
+            pairCandidate = m_seriesCandidates[static_cast<std::size_t>(pairIndex)];
+            pairSnapshot = readCandidateSnapshot(*pairCandidate, &pairSourceFiles);
+            if (pairSnapshot)
+                applyProjectionPhotometric(*pairSnapshot, *pairCandidate);
         }
 
         resetMetadata();
@@ -590,6 +919,15 @@ bool MedicalDataController::loadSeriesCandidate(int index)
             ? (candidate->projection ? QStringLiteral("X 线投影")
                                      : QStringLiteral("未命名序列"))
             : candidate->seriesDescription;
+        m_projectionViewLabel = candidate->projection ? candidate->projectionViewLabel : QString();
+        m_patientOrientation = candidate->projection ? candidate->patientOrientation : QString();
+        m_imageType = candidate->imageType;
+        m_sopClassName = candidate->sopClassName;
+        m_projectionUnsigned = candidate->projection && candidate->unsignedPixels;
+        m_projectionPairViewLabel = pairCandidate ? pairCandidate->projectionViewLabel : QString();
+        m_projectionPairOrientation = pairCandidate ? pairCandidate->patientOrientation : QString();
+        m_projectionPairImageType = pairCandidate ? pairCandidate->imageType : QString();
+        m_projectionPairSopClassName = pairCandidate ? pairCandidate->sopClassName : QString();
         m_windowWidth = candidate->windowWidth;
         m_windowLevel = candidate->windowLevel;
         if (candidate->projection && candidate->unsignedPixels)
@@ -602,7 +940,7 @@ bool MedicalDataController::loadSeriesCandidate(int index)
         }
 
         m_sourcePath = QDir::toNativeSeparators(firstPath);
-        installVolume(std::move(snapshot), sourceFiles);
+        installVolume(std::move(snapshot), sourceFiles, std::move(pairSnapshot), pairSourceFiles);
         m_selectedSeriesIndex = index;
         emit selectedSeriesIndexChanged();
         m_statusMessage = candidate->projection
@@ -739,6 +1077,7 @@ bool MedicalDataController::applyThreshold(double lower, double upper)
             std::lock_guard<std::mutex> guard(m_snapshotMutex);
             m_mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot);
         }
+        updateActiveVolumeNode();
         ++m_segmentationRevision;
         m_statusMessage = QStringLiteral("阈值分割完成：%1 至 %2 HU").arg(lower).arg(upper);
         m_errorMessage.clear();
@@ -842,6 +1181,7 @@ bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
             std::lock_guard<std::mutex> guard(m_snapshotMutex);
             m_mask = std::move(mask);
         }
+        updateActiveVolumeNode();
         ++m_segmentationRevision;
         m_statusMessage = QStringLiteral("种子生长完成：IJK (%1, %2, %3)，%4 个体素")
                               .arg(seedX).arg(seedY).arg(seedZ).arg(selectedCount);
@@ -861,6 +1201,7 @@ void MedicalDataController::clearSegmentation()
         std::lock_guard<std::mutex> guard(m_snapshotMutex);
         m_mask.reset();
     }
+    updateActiveVolumeNode();
     ++m_segmentationRevision;
     m_statusMessage = QStringLiteral("分割结果已清除");
     emit segmentationChanged();
@@ -868,9 +1209,10 @@ void MedicalDataController::clearSegmentation()
 }
 
 double MedicalDataController::estimateDistanceMm(int viewType, double pixelDx, double pixelDy,
-                                                 double viewportWidth, double viewportHeight) const
+                                                 double viewportWidth, double viewportHeight,
+                                                 bool pairedProjection) const
 {
-    const auto snapshot = volumeSnapshot();
+    const auto snapshot = pairedProjection ? projectionPairSnapshot() : volumeSnapshot();
     if (!snapshot || viewportWidth <= 0.0 || viewportHeight <= 0.0)
         return 0.0;
 
@@ -899,6 +1241,7 @@ void MedicalDataController::setWindowWidth(double value)
     if (qFuzzyCompare(m_windowWidth, value))
         return;
     m_windowWidth = value;
+    updateActiveVolumeNode();
     emit windowingChanged();
 }
 
@@ -907,6 +1250,7 @@ void MedicalDataController::setWindowLevel(double value)
     if (qFuzzyCompare(m_windowLevel, value))
         return;
     m_windowLevel = value;
+    updateActiveVolumeNode();
     emit windowingChanged();
 }
 
@@ -926,14 +1270,106 @@ void MedicalDataController::setError(const QString &message)
 }
 
 void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapshot,
-                                          const QStringList &sourceFiles)
+                                          const QStringList &sourceFiles,
+                                          std::shared_ptr<VolumeSnapshot> pairSnapshot,
+                                          const QStringList &pairSourceFiles)
 {
+    auto node = std::make_shared<LoadedVolumeNode>();
+    node->id = !m_sourcePath.isEmpty()
+        ? m_sourcePath
+        : QStringLiteral("volume-%1").arg(m_datasetRevision + 1);
+    node->name = m_seriesDescription;
+    node->patientName = m_patientName;
+    node->patientId = m_patientId;
+    node->patientSex = m_patientSex;
+    node->patientBirthDate = m_patientBirthDate;
+    node->modality = m_modality;
+    node->studyDescription = m_studyDescription;
+    node->studyDate = m_studyDate;
+    node->projectionViewLabel = m_projectionViewLabel;
+    node->projectionPairViewLabel = m_projectionPairViewLabel;
+    node->patientOrientation = m_patientOrientation;
+    node->projectionPairOrientation = m_projectionPairOrientation;
+    node->imageType = m_imageType;
+    node->sopClassName = m_sopClassName;
+    node->projectionPairImageType = m_projectionPairImageType;
+    node->projectionPairSopClassName = m_projectionPairSopClassName;
+    node->projectionUnsigned = m_projectionUnsigned;
+    node->sourcePath = m_sourcePath;
+    node->sourceFiles = sourceFiles;
+    node->pairSourceFiles = pairSourceFiles;
+    node->volume = std::move(snapshot);
+    node->projectionPair = std::move(pairSnapshot);
+    node->windowWidth = m_windowWidth;
+    node->windowLevel = m_windowLevel;
+
+    int targetIndex = -1;
+    for (int index = 0; index < static_cast<int>(m_volumeNodes.size()); ++index) {
+        if (m_volumeNodes[static_cast<std::size_t>(index)]->id == node->id) {
+            targetIndex = index;
+            node->name = m_volumeNodes[static_cast<std::size_t>(index)]->name;
+            node->visible = m_volumeNodes[static_cast<std::size_t>(index)]->visible;
+            break;
+        }
+    }
+    if (targetIndex < 0) {
+        m_volumeNodes.push_back(node);
+        targetIndex = static_cast<int>(m_volumeNodes.size()) - 1;
+    } else {
+        m_volumeNodes[static_cast<std::size_t>(targetIndex)] = node;
+    }
+    activateVolumeNode(targetIndex);
+}
+
+void MedicalDataController::updateActiveVolumeNode()
+{
+    if (m_selectedVolumeIndex < 0
+        || m_selectedVolumeIndex >= static_cast<int>(m_volumeNodes.size()))
+        return;
+    auto &node = m_volumeNodes[static_cast<std::size_t>(m_selectedVolumeIndex)];
     {
         std::lock_guard<std::mutex> guard(m_snapshotMutex);
-        m_volume = std::move(snapshot);
-        m_mask.reset();
-        m_sourceFiles = sourceFiles;
+        node->volume = m_volume;
+        node->projectionPair = m_projectionPair;
+        node->mask = m_mask;
     }
+    node->windowWidth = m_windowWidth;
+    node->windowLevel = m_windowLevel;
+}
+
+void MedicalDataController::activateVolumeNode(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_volumeNodes.size()))
+        return;
+    const auto &node = m_volumeNodes[static_cast<std::size_t>(index)];
+    {
+        std::lock_guard<std::mutex> guard(m_snapshotMutex);
+        m_volume = node->volume;
+        m_projectionPair = node->projectionPair;
+        m_mask = node->mask;
+        m_sourceFiles = node->sourceFiles;
+    }
+    m_selectedVolumeIndex = index;
+    m_patientName = node->patientName;
+    m_patientId = node->patientId;
+    m_patientSex = node->patientSex;
+    m_patientBirthDate = node->patientBirthDate;
+    m_modality = node->modality;
+    m_studyDescription = node->studyDescription;
+    m_studyDate = node->studyDate;
+    m_seriesDescription = node->name;
+    m_projectionViewLabel = node->projectionViewLabel;
+    m_projectionPairViewLabel = node->projectionPairViewLabel;
+    m_patientOrientation = node->patientOrientation;
+    m_projectionPairOrientation = node->projectionPairOrientation;
+    m_imageType = node->imageType;
+    m_sopClassName = node->sopClassName;
+    m_projectionPairImageType = node->projectionPairImageType;
+    m_projectionPairSopClassName = node->projectionPairSopClassName;
+    m_projectionUnsigned = node->projectionUnsigned;
+    m_sourcePath = node->sourcePath;
+    m_windowWidth = node->windowWidth;
+    m_windowLevel = node->windowLevel;
     ++m_datasetRevision;
     ++m_segmentationRevision;
     m_regionGrowingSeed = {-1, -1, -1};
@@ -942,6 +1378,30 @@ void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapsh
     emit dataChanged();
     emit segmentationChanged();
     emit regionGrowingSeedChanged();
+    emit windowingChanged();
+    emit volumeNodesChanged();
+}
+
+void MedicalDataController::clearActiveVolume()
+{
+    {
+        std::lock_guard<std::mutex> guard(m_snapshotMutex);
+        m_volume.reset();
+        m_projectionPair.reset();
+        m_mask.reset();
+    }
+    m_selectedVolumeIndex = -1;
+    resetMetadata();
+    ++m_datasetRevision;
+    ++m_segmentationRevision;
+    m_regionGrowingSeed = {-1, -1, -1};
+    m_regionGrowingSeedValue = 0;
+    m_regionGrowingSeedValid = false;
+    emit dataChanged();
+    emit segmentationChanged();
+    emit regionGrowingSeedChanged();
+    emit windowingChanged();
+    emit volumeNodesChanged();
 }
 
 void MedicalDataController::resetMetadata()
@@ -954,6 +1414,15 @@ void MedicalDataController::resetMetadata()
     m_studyDescription = QStringLiteral("未命名检查");
     m_studyDate = QStringLiteral("--");
     m_seriesDescription = QStringLiteral("未命名序列");
+    m_projectionViewLabel.clear();
+    m_projectionPairViewLabel.clear();
+    m_patientOrientation.clear();
+    m_projectionPairOrientation.clear();
+    m_imageType.clear();
+    m_sopClassName.clear();
+    m_projectionPairImageType.clear();
+    m_projectionPairSopClassName.clear();
+    m_projectionUnsigned = false;
     m_sourcePath.clear();
     m_sourceFiles.clear();
 }

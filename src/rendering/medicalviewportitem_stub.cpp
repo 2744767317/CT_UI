@@ -75,6 +75,62 @@ void MedicalViewportItem::setShowSegmentation(bool visible)
     update();
 }
 
+void MedicalViewportItem::setPairedProjection(bool paired)
+{
+    if (m_pairedProjection == paired)
+        return;
+    m_pairedProjection = paired;
+    emit pairedProjectionChanged();
+    reloadData();
+}
+
+void MedicalViewportItem::setShowImage(bool visible)
+{
+    if (m_showImage == visible)
+        return;
+    m_showImage = visible;
+    emit showImageChanged();
+    update();
+}
+
+void MedicalViewportItem::setSegmentationOpacity(double opacity)
+{
+    opacity = std::clamp(opacity, 0.0, 1.0);
+    if (qFuzzyCompare(m_segmentationOpacity, opacity))
+        return;
+    m_segmentationOpacity = opacity;
+    emit segmentationOpacityChanged();
+    update();
+}
+
+void MedicalViewportItem::setRotationQuarterTurns(int turns)
+{
+    turns = ((turns % 4) + 4) % 4;
+    if (m_rotationQuarterTurns == turns)
+        return;
+    m_rotationQuarterTurns = turns;
+    emit orientationChanged();
+    reloadData();
+}
+
+void MedicalViewportItem::setFlipHorizontal(bool flipped)
+{
+    if (m_flipHorizontal == flipped)
+        return;
+    m_flipHorizontal = flipped;
+    emit orientationChanged();
+    reloadData();
+}
+
+void MedicalViewportItem::setFlipVertical(bool flipped)
+{
+    if (m_flipVertical == flipped)
+        return;
+    m_flipVertical = flipped;
+    emit orientationChanged();
+    reloadData();
+}
+
 void MedicalViewportItem::setCropMinimum(double value)
 {
     m_cropMinimum = std::clamp(value, 0.0, m_cropMaximum - 0.01);

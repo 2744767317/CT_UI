@@ -9,11 +9,23 @@ Item {
     signal requestFolderImport()
     signal requestFileImport()
     signal requestExport()
+
     property string toolMode: "浏览"
+    property int toolModeIndex: 0
     property int layoutMode: 0
     property bool mip: false
     property int volumePreset: MedicalViewport.BonePreset
     property bool showSegmentation: true
+    property bool showImage: true
+    property bool showMeasurements: true
+    property real segmentationOpacity: 0.72
+    property bool activePairedProjection: false
+    property int frontalRotationQuarterTurns: 0
+    property bool frontalFlipHorizontal: false
+    property bool frontalFlipVertical: false
+    property int lateralRotationQuarterTurns: 0
+    property bool lateralFlipHorizontal: false
+    property bool lateralFlipVertical: false
     property bool seedPicking: false
     property int seedViewType: -1
     property real seedMarkerX: 0.5
@@ -22,12 +34,30 @@ Item {
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
 
+    function resetProjectionAdjustments() {
+        root.activePairedProjection = false
+        root.frontalRotationQuarterTurns = 0
+        root.frontalFlipHorizontal = false
+        root.frontalFlipVertical = false
+        root.lateralRotationQuarterTurns = 0
+        root.lateralFlipHorizontal = false
+        root.lateralFlipVertical = false
+    }
+
     function acceptSeed(viewType, normalizedX, normalizedY, slicePosition) {
         root.seedViewType = viewType
         root.seedMarkerX = normalizedX
         root.seedMarkerY = normalizedY
         root.seedSlicePosition = slicePosition
         root.seedPicking = false
+    }
+
+    Connections {
+        target: medicalData
+        function onDataChanged() {
+            root.resetProjectionAdjustments()
+            root.showImage = medicalData.activeVolumeVisible
+        }
     }
 
     ColumnLayout {
@@ -49,12 +79,16 @@ Item {
                     model: ["浏览", "窗宽窗位", "平移", "缩放", "测量"]
                     delegate: ActionButton {
                         required property string modelData
+                        required property int index
                         text: modelData
                         checkable: true
                         checked: root.toolMode === modelData
                         active: checked
                         ButtonGroup.group: toolGroup
-                        onClicked: root.toolMode = modelData
+                        onClicked: {
+                            root.toolMode = modelData
+                            root.toolModeIndex = index
+                        }
                     }
                 }
                 Rectangle { width: 1; Layout.fillHeight: true; Layout.topMargin: 8; Layout.bottomMargin: 8; color: Theme.border }
@@ -64,7 +98,10 @@ Item {
                     onActivated: index => root.layoutMode = index
                 }
                 Item { Layout.fillWidth: true }
-                StatusPill { text: medicalData.volumeData ? "CT VOLUME" : "2D X-RAY"; tone: medicalData.loaded ? Theme.success : Theme.textMuted }
+                StatusPill {
+                    text: medicalData.volumeData ? "CT VOLUME" : (medicalData.projectionData ? "DX PROJECTION" : "NO DATA")
+                    tone: medicalData.loaded ? Theme.success : Theme.textMuted
+                }
             }
         }
 
@@ -81,89 +118,169 @@ Item {
                 onRequestFolderImport: root.requestFolderImport()
                 onRequestFileImport: root.requestFileImport()
                 onRequestExport: root.requestExport()
+                onImageVisibilityRequested: visible => {
+                    root.showImage = visible
+                    if (medicalData.selectedVolumeIndex >= 0)
+                        medicalData.setVolumeVisibility(medicalData.selectedVolumeIndex, visible)
+                }
+                onSegmentationVisibilityRequested: visible => root.showSegmentation = visible
+                onMeasurementVisibilityRequested: visible => root.showMeasurements = visible
+                onSegmentationOpacityRequested: opacity => root.segmentationOpacity = opacity
+                imageVisible: root.showImage
+                segmentationVisible: root.showSegmentation
+                measurementsVisible: root.showMeasurements
+                segmentationOpacity: root.segmentationOpacity
             }
 
-            GridLayout {
+            Item {
+                id: canvasHost
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumWidth: 0
-                columns: root.layoutMode === 2 ? 3 : 2
-                rows: 2
-                rowSpacing: 3
-                columnSpacing: 3
 
-                ViewportPane {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.row: 0; Layout.column: 0
-                    Layout.rowSpan: !medicalData.volumeData ? 2 : 1
-                    Layout.columnSpan: !medicalData.volumeData ? 2 : 1
-                    visible: root.layoutMode !== 1
-                    viewType: MedicalViewport.Axial
-                    title: "AXIAL 轴状位"
-                    viewColor: Theme.axial
-                    toolMode: root.toolMode
-                    showSegmentation: root.showSegmentation
-                    seedPicking: root.seedPicking
-                    seedMarkerVisible: root.seedViewType === viewType
-                                       && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
-                    seedMarkerX: root.seedMarkerX
-                    seedMarkerY: root.seedMarkerY
-                    onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 3
+                    visible: medicalData.projectionData
+
+                    ViewportPane {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        viewType: MedicalViewport.Axial
+                        title: medicalData.projectionViewLabel
+                        viewColor: Theme.axial
+                        toolMode: root.toolMode
+                        toolModeIndex: root.toolModeIndex
+                        showImage: root.showImage
+                        showSegmentation: false
+                        showMeasurements: root.showMeasurements
+                        rotationQuarterTurns: root.frontalRotationQuarterTurns
+                        flipHorizontal: root.frontalFlipHorizontal
+                        flipVertical: root.frontalFlipVertical
+                        activeViewport: medicalData.projectionData && !root.activePairedProjection
+                        onActivated: root.activePairedProjection = false
+                    }
+                    ViewportPane {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        visible: medicalData.pairedProjectionAvailable
+                        pairedProjection: true
+                        viewType: MedicalViewport.Axial
+                        title: medicalData.projectionPairViewLabel
+                        viewColor: Theme.coronal
+                        toolMode: root.toolMode
+                        toolModeIndex: root.toolModeIndex
+                        showImage: root.showImage
+                        showSegmentation: false
+                        showMeasurements: root.showMeasurements
+                        rotationQuarterTurns: root.lateralRotationQuarterTurns
+                        flipHorizontal: root.lateralFlipHorizontal
+                        flipVertical: root.lateralFlipVertical
+                        activeViewport: root.activePairedProjection
+                        onActivated: root.activePairedProjection = true
+                    }
+                    Text {
+                        visible: medicalData.loaded && !medicalData.pairedProjectionAvailable
+                        Layout.alignment: Qt.AlignBottom | Qt.AlignHCenter
+                        Layout.bottomMargin: 12
+                        text: "单幅投影：未发现同检查的另一平面"
+                        color: Theme.textMuted
+                        font.pixelSize: 12
+                    }
                 }
-                ViewportPane {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.row: root.layoutMode === 2 ? 0 : 1
-                    Layout.column: root.layoutMode === 2 ? 1 : 0
-                    visible: medicalData.volumeData && root.layoutMode !== 1
-                    viewType: MedicalViewport.Coronal
-                    title: "CORONAL 冠状位"
-                    viewColor: Theme.coronal
-                    toolMode: root.toolMode
-                    showSegmentation: root.showSegmentation
-                    seedPicking: root.seedPicking
-                    seedMarkerVisible: root.seedViewType === viewType
-                                       && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
-                    seedMarkerX: root.seedMarkerX
-                    seedMarkerY: root.seedMarkerY
-                    onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
-                }
-                ViewportPane {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.row: root.layoutMode === 2 ? 0 : 1
-                    Layout.column: root.layoutMode === 2 ? 2 : 1
-                    visible: medicalData.volumeData && root.layoutMode !== 1
-                    viewType: MedicalViewport.Sagittal
-                    title: "SAGITTAL 矢状位"
-                    viewColor: Theme.sagittal
-                    toolMode: root.toolMode
-                    showSegmentation: root.showSegmentation
-                    seedPicking: root.seedPicking
-                    seedMarkerVisible: root.seedViewType === viewType
-                                       && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
-                    seedMarkerX: root.seedMarkerX
-                    seedMarkerY: root.seedMarkerY
-                    onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
-                }
-                ViewportPane {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.row: root.layoutMode === 1 ? 0 : 0
-                    Layout.column: root.layoutMode === 1 ? 0 : 1
-                    Layout.rowSpan: root.layoutMode === 1 ? 2 : 1
-                    Layout.columnSpan: root.layoutMode === 1 ? 2 : 1
-                    visible: medicalData.volumeData && root.layoutMode !== 2
-                    viewType: MedicalViewport.Volume3D
-                    title: root.mip ? "3D MIP" : "3D VOLUME"
-                    viewColor: Theme.volume
-                    toolMode: root.toolMode
-                    mip: root.mip
-                    volumePreset: root.volumePreset
-                    showSegmentation: root.showSegmentation
-                    cropMinimum: root.cropMinimum
-                    cropMaximum: root.cropMaximum
+
+                GridLayout {
+                    anchors.fill: parent
+                    visible: medicalData.volumeData
+                    columns: root.layoutMode === 2 ? 3 : 2
+                    rows: 2
+                    rowSpacing: 3
+                    columnSpacing: 3
+
+                    ViewportPane {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.row: 0; Layout.column: 0
+                        Layout.rowSpan: root.layoutMode === 1 ? 2 : 1
+                        Layout.columnSpan: root.layoutMode === 1 ? 2 : 1
+                        visible: root.layoutMode !== 1
+                        viewType: MedicalViewport.Axial
+                        title: "AXIAL"
+                        viewColor: Theme.axial
+                        toolMode: root.toolMode
+                        toolModeIndex: root.toolModeIndex
+                        showImage: root.showImage
+                        showSegmentation: root.showSegmentation
+                        showMeasurements: root.showMeasurements
+                        segmentationOpacity: root.segmentationOpacity
+                        seedPicking: root.seedPicking
+                        seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
+                        seedMarkerX: root.seedMarkerX
+                        seedMarkerY: root.seedMarkerY
+                        onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
+                    }
+                    ViewportPane {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.row: root.layoutMode === 2 ? 0 : 1
+                        Layout.column: root.layoutMode === 2 ? 1 : 0
+                        visible: root.layoutMode !== 1
+                        viewType: MedicalViewport.Coronal
+                        title: "CORONAL"
+                        viewColor: Theme.coronal
+                        toolMode: root.toolMode
+                        toolModeIndex: root.toolModeIndex
+                        showImage: root.showImage
+                        showSegmentation: root.showSegmentation
+                        showMeasurements: root.showMeasurements
+                        segmentationOpacity: root.segmentationOpacity
+                        seedPicking: root.seedPicking
+                        seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
+                        seedMarkerX: root.seedMarkerX
+                        seedMarkerY: root.seedMarkerY
+                        onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
+                    }
+                    ViewportPane {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.row: root.layoutMode === 2 ? 0 : 1
+                        Layout.column: root.layoutMode === 2 ? 2 : 1
+                        visible: root.layoutMode !== 1
+                        viewType: MedicalViewport.Sagittal
+                        title: "SAGITTAL"
+                        viewColor: Theme.sagittal
+                        toolMode: root.toolMode
+                        toolModeIndex: root.toolModeIndex
+                        showImage: root.showImage
+                        showSegmentation: root.showSegmentation
+                        showMeasurements: root.showMeasurements
+                        segmentationOpacity: root.segmentationOpacity
+                        seedPicking: root.seedPicking
+                        seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
+                        seedMarkerX: root.seedMarkerX
+                        seedMarkerY: root.seedMarkerY
+                        onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
+                    }
+                    ViewportPane {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.row: 0
+                        Layout.column: root.layoutMode === 1 ? 0 : 1
+                        Layout.rowSpan: root.layoutMode === 1 ? 2 : 1
+                        visible: root.layoutMode !== 2
+                        viewType: MedicalViewport.Volume3D
+                        title: root.mip ? "3D MIP" : "3D VOLUME"
+                        viewColor: Theme.volume
+                        toolMode: root.toolMode
+                        toolModeIndex: root.toolModeIndex
+                        showImage: root.showImage
+                        mip: root.mip
+                        volumePreset: root.volumePreset
+                        showSegmentation: root.showSegmentation
+                        showMeasurements: root.showMeasurements
+                        segmentationOpacity: root.segmentationOpacity
+                        cropMinimum: root.cropMinimum
+                        cropMaximum: root.cropMaximum
+                    }
                 }
             }
 
@@ -178,13 +295,50 @@ Item {
                 seedPicking: root.seedPicking
                 cropMinimum: root.cropMinimum
                 cropMaximum: root.cropMaximum
+                activeProjection: root.activePairedProjection
+                projectionViewLabel: root.activePairedProjection
+                                     ? medicalData.projectionPairViewLabel
+                                     : medicalData.projectionViewLabel
+                projectionOrientation: root.activePairedProjection
+                                       ? medicalData.projectionPairOrientation
+                                       : medicalData.patientOrientation
+                projectionSopClassName: root.activePairedProjection
+                                        ? medicalData.projectionPairSopClassName
+                                        : medicalData.sopClassName
+                projectionImageType: root.activePairedProjection
+                                     ? medicalData.projectionPairImageType
+                                     : medicalData.imageType
+                rotationQuarterTurns: root.activePairedProjection
+                                      ? root.lateralRotationQuarterTurns
+                                      : root.frontalRotationQuarterTurns
+                flipHorizontal: root.activePairedProjection
+                                ? root.lateralFlipHorizontal
+                                : root.frontalFlipHorizontal
+                flipVertical: root.activePairedProjection
+                              ? root.lateralFlipVertical
+                              : root.frontalFlipVertical
                 onMipRequested: enabled => root.mip = enabled
                 onVolumePresetRequested: preset => root.volumePreset = preset
                 onSeedPickingRequested: enabled => root.seedPicking = enabled
                 onSegmentationVisibilityRequested: visible => root.showSegmentation = visible
-                onCropRequested: (minimum, maximum) => {
-                    root.cropMinimum = minimum
-                    root.cropMaximum = maximum
+                onCropRequested: (minimum, maximum) => { root.cropMinimum = minimum; root.cropMaximum = maximum }
+                onRotationRequested: turns => {
+                    if (root.activePairedProjection)
+                        root.lateralRotationQuarterTurns = turns
+                    else
+                        root.frontalRotationQuarterTurns = turns
+                }
+                onFlipHorizontalRequested: flipped => {
+                    if (root.activePairedProjection)
+                        root.lateralFlipHorizontal = flipped
+                    else
+                        root.frontalFlipHorizontal = flipped
+                }
+                onFlipVerticalRequested: flipped => {
+                    if (root.activePairedProjection)
+                        root.lateralFlipVertical = flipped
+                    else
+                        root.frontalFlipVertical = flipped
                 }
                 onRequestExport: root.requestExport()
             }
@@ -199,11 +353,11 @@ Item {
                 anchors.fill: parent
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
-                Text { text: medicalData.seriesDescription; color: Theme.textSecondary; font.pixelSize: 12 }
+                Text { text: medicalData.seriesDescription; color: Theme.textSecondary; font.pixelSize: 12; elide: Text.ElideRight; Layout.maximumWidth: 360 }
                 Text { text: medicalData.dimensionsText; color: Theme.textSecondary; font.pixelSize: 12 }
                 Text { text: medicalData.spacingText; color: Theme.textSecondary; font.pixelSize: 12 }
                 Item { Layout.fillWidth: true }
-                Text { text: medicalBackendEnabled ? "VTK / ITK 后端就绪" : "MinGW UI 兼容模式"; color: medicalBackendEnabled ? Theme.success : Theme.accent; font.pixelSize: 12 }
+                Text { text: medicalBackendEnabled ? "VTK / ITK" : "兼容模式"; color: medicalBackendEnabled ? Theme.success : Theme.accent; font.pixelSize: 12 }
             }
         }
     }

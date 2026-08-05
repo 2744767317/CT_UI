@@ -33,6 +33,7 @@
 
 #include <QMetaObject>
 #include <QPointer>
+#include <QStringList>
 
 namespace {
 
@@ -45,12 +46,15 @@ public:
     vtkSmartPointer<vtkRenderer> renderer;
     vtkSmartPointer<vtkMatrix4x4> dataToWorld;
     vtkSmartPointer<vtkMatrix4x4> worldToData;
+    vtkSmartPointer<vtkMatrix4x4> renderTransform;
+    vtkSmartPointer<vtkMatrix4x4> worldToRenderData;
     vtkSmartPointer<vtkImageData> image;
     vtkSmartPointer<vtkImageData> mask;
     vtkSmartPointer<vtkImageSliceMapper> sliceMapper;
     vtkSmartPointer<vtkImageSlice> sliceActor;
     vtkSmartPointer<vtkImageSliceMapper> maskMapper;
     vtkSmartPointer<vtkImageSlice> maskActor;
+    vtkSmartPointer<vtkLookupTable> maskLookup;
     vtkSmartPointer<vtkGPUVolumeRayCastMapper> volumeMapper;
     vtkSmartPointer<vtkColorTransferFunction> color;
     vtkSmartPointer<vtkPiecewiseFunction> opacity;
@@ -98,6 +102,77 @@ void updatePatientTransform(ViewportPipeline *pipeline, const VolumeSnapshot &sn
     vtkMatrix4x4::Invert(pipeline->dataToWorld, pipeline->worldToData);
 }
 
+int automaticProjectionQuarterTurns(const QString &orientation)
+{
+    const QStringList axes = orientation.split(QChar(u'\\'), Qt::SkipEmptyParts);
+    if (axes.size() < 2)
+        return 0;
+    const QString first = axes.at(0).trimmed().toUpper();
+    const QString second = axes.at(1).trimmed().toUpper();
+    if (second == QStringLiteral("F"))
+        return 0;
+    if (second == QStringLiteral("H"))
+        return 2;
+    if (first == QStringLiteral("H"))
+        return 1;
+    if (first == QStringLiteral("F"))
+        return 3;
+    return 0;
+}
+
+vtkSmartPointer<vtkMatrix4x4> displayTransformFor(const VolumeSnapshot &snapshot,
+                                                  bool projection,
+                                                  const QString &patientOrientation,
+                                                  int rotationQuarterTurns,
+                                                  bool flipHorizontal,
+                                                  bool flipVertical)
+{
+    auto transform = vtkSmartPointer<vtkMatrix4x4>::New();
+    transform->Identity();
+    if (!projection)
+        return transform;
+
+    const double width = std::max(0, snapshot.dimensions[0] - 1) * snapshot.spacing[0];
+    const double height = std::max(0, snapshot.dimensions[1] - 1) * snapshot.spacing[1];
+    const double centerX = width * 0.5;
+    const double centerY = height * 0.5;
+
+    auto preMultiply = [&transform](vtkMatrix4x4 *operation) {
+        auto combined = vtkSmartPointer<vtkMatrix4x4>::New();
+        vtkMatrix4x4::Multiply4x4(operation, transform, combined);
+        transform = combined;
+    };
+    auto centeredOperation = [centerX, centerY](double a00, double a01,
+                                                 double a10, double a11) {
+        auto operation = vtkSmartPointer<vtkMatrix4x4>::New();
+        operation->Identity();
+        operation->SetElement(0, 0, a00);
+        operation->SetElement(0, 1, a01);
+        operation->SetElement(1, 0, a10);
+        operation->SetElement(1, 1, a11);
+        operation->SetElement(0, 3, centerX - a00 * centerX - a01 * centerY);
+        operation->SetElement(1, 3, centerY - a10 * centerX - a11 * centerY);
+        return operation;
+    };
+
+    // DICOM pixel row zero is the top row; VTK image coordinates grow upward.
+    preMultiply(centeredOperation(1.0, 0.0, 0.0, -1.0));
+
+    const int automaticTurns = automaticProjectionQuarterTurns(patientOrientation);
+    const int turns = ((automaticTurns + rotationQuarterTurns) % 4 + 4) % 4;
+    if (turns != 0) {
+        constexpr double halfPi = 1.5707963267948966;
+        const double angle = halfPi * turns;
+        preMultiply(centeredOperation(std::cos(angle), -std::sin(angle),
+                                      std::sin(angle), std::cos(angle)));
+    }
+    if (flipHorizontal)
+        preMultiply(centeredOperation(-1.0, 0.0, 0.0, 1.0));
+    if (flipVertical)
+        preMultiply(centeredOperation(1.0, 0.0, 0.0, -1.0));
+    return transform;
+}
+
 int orientationFor(MedicalViewportItem::ViewType type)
 {
     if (type == MedicalViewportItem::ViewType::Sagittal)
@@ -108,7 +183,8 @@ int orientationFor(MedicalViewportItem::ViewType type)
 }
 
 void applyVolumePreset(ViewportPipeline *pipeline,
-                       MedicalViewportItem::VolumePreset preset, bool mip)
+                       MedicalViewportItem::VolumePreset preset, bool mip,
+                       double windowWidth, double windowLevel)
 {
     if (!pipeline->color || !pipeline->opacity || !pipeline->volumeProperty)
         return;
@@ -123,15 +199,16 @@ void applyVolumePreset(ViewportPipeline *pipeline,
     property->SetSpecular(0.12);
     property->SetSpecularPower(10.0);
 
+    const double width = std::max(1.0, windowWidth);
+    const double low = windowLevel - width * 0.5;
+    const double high = windowLevel + width * 0.5;
+    const auto at = [low, width](double position) { return low + width * position; };
+
     if (mip) {
-        pipeline->color->AddRGBPoint(-3024.0, 0.0, 0.0, 0.0);
-        pipeline->color->AddRGBPoint(-637.62, 1.0, 1.0, 1.0);
-        pipeline->color->AddRGBPoint(700.0, 1.0, 1.0, 1.0);
-        pipeline->color->AddRGBPoint(3071.0, 1.0, 1.0, 1.0);
-        pipeline->opacity->AddPoint(-3024.0, 0.0);
-        pipeline->opacity->AddPoint(-637.62, 0.0);
-        pipeline->opacity->AddPoint(700.0, 1.0);
-        pipeline->opacity->AddPoint(3071.0, 1.0);
+        pipeline->color->AddRGBPoint(low, 0.0, 0.0, 0.0);
+        pipeline->color->AddRGBPoint(high, 1.0, 1.0, 1.0);
+        pipeline->opacity->AddPoint(low, 0.0);
+        pipeline->opacity->AddPoint(high, 1.0);
         property->ShadeOff();
         property->SetAmbient(1.0);
         return;
@@ -139,49 +216,47 @@ void applyVolumePreset(ViewportPipeline *pipeline,
 
     switch (preset) {
     case MedicalViewportItem::VolumePreset::BonePreset:
-        pipeline->color->AddRGBPoint(-1000.0, 0.0, 0.0, 0.0);
-        pipeline->color->AddRGBPoint(152.19, 0.45, 0.20, 0.10);
-        pipeline->color->AddRGBPoint(463.28, 0.76, 0.48, 0.25);
-        pipeline->color->AddRGBPoint(659.15, 0.92, 0.76, 0.52);
-        pipeline->color->AddRGBPoint(953.0, 1.0, 0.93, 0.80);
-        pipeline->opacity->AddPoint(-1000.0, 0.0);
-        pipeline->opacity->AddPoint(152.19, 0.0);
-        pipeline->opacity->AddPoint(278.93, 0.190476);
-        pipeline->opacity->AddPoint(952.0, 0.2);
+        pipeline->color->AddRGBPoint(low, 0.0, 0.0, 0.0);
+        pipeline->color->AddRGBPoint(at(0.30), 0.45, 0.20, 0.10);
+        pipeline->color->AddRGBPoint(at(0.58), 0.76, 0.48, 0.25);
+        pipeline->color->AddRGBPoint(at(0.78), 0.92, 0.76, 0.52);
+        pipeline->color->AddRGBPoint(high, 1.0, 0.93, 0.80);
+        pipeline->opacity->AddPoint(low, 0.0);
+        pipeline->opacity->AddPoint(at(0.34), 0.0);
+        pipeline->opacity->AddPoint(at(0.50), 0.16);
+        pipeline->opacity->AddPoint(high, 0.58);
         property->SetAmbient(0.2);
         property->SetDiffuse(1.0);
         property->SetSpecular(0.0);
         property->SetSpecularPower(1.0);
         break;
     case MedicalViewportItem::VolumePreset::LungPreset:
-        pipeline->color->AddRGBPoint(-1000.0, 0.3, 0.3, 1.0);
-        pipeline->color->AddRGBPoint(-600.0, 0.0, 0.0, 1.0);
-        pipeline->color->AddRGBPoint(-530.0, 0.134704, 0.781726, 0.0724558);
-        pipeline->color->AddRGBPoint(-460.0, 0.929244, 1.0, 0.109473);
-        pipeline->color->AddRGBPoint(-400.0, 0.888889, 0.254949, 0.0240258);
-        pipeline->color->AddRGBPoint(2952.0, 1.0, 0.3, 0.3);
-        pipeline->opacity->AddPoint(-1000.0, 0.0);
-        pipeline->opacity->AddPoint(-600.0, 0.0);
-        pipeline->opacity->AddPoint(-599.0, 0.15);
-        pipeline->opacity->AddPoint(-400.0, 0.15);
-        pipeline->opacity->AddPoint(-399.0, 0.0);
-        pipeline->opacity->AddPoint(2952.0, 0.0);
+        pipeline->color->AddRGBPoint(low, 0.12, 0.18, 0.28);
+        pipeline->color->AddRGBPoint(at(0.38), 0.20, 0.42, 0.52);
+        pipeline->color->AddRGBPoint(at(0.58), 0.56, 0.72, 0.64);
+        pipeline->color->AddRGBPoint(at(0.78), 0.92, 0.84, 0.68);
+        pipeline->color->AddRGBPoint(high, 1.0, 0.95, 0.90);
+        pipeline->opacity->AddPoint(low, 0.0);
+        pipeline->opacity->AddPoint(at(0.24), 0.0);
+        pipeline->opacity->AddPoint(at(0.42), 0.12);
+        pipeline->opacity->AddPoint(at(0.72), 0.22);
+        pipeline->opacity->AddPoint(high, 0.05);
         property->SetAmbient(0.42);
         property->SetDiffuse(0.58);
         property->SetSpecular(0.0);
         property->SetSpecularPower(1.0);
         break;
     case MedicalViewportItem::VolumePreset::SoftTissuePreset:
-        pipeline->color->AddRGBPoint(-2048.0, 0.0, 0.0, 0.0);
-        pipeline->color->AddRGBPoint(-167.01, 0.0, 0.0, 0.0);
-        pipeline->color->AddRGBPoint(-160.0, 0.0556356, 0.0556356, 0.0556356);
-        pipeline->color->AddRGBPoint(240.0, 1.0, 1.0, 1.0);
-        pipeline->color->AddRGBPoint(3661.0, 1.0, 1.0, 1.0);
-        pipeline->opacity->AddPoint(-2048.0, 0.0);
-        pipeline->opacity->AddPoint(-167.01, 0.0);
-        pipeline->opacity->AddPoint(-160.0, 1.0);
-        pipeline->opacity->AddPoint(240.0, 1.0);
-        pipeline->opacity->AddPoint(3661.0, 1.0);
+        pipeline->color->AddRGBPoint(low, 0.0, 0.0, 0.0);
+        pipeline->color->AddRGBPoint(at(0.30), 0.18, 0.08, 0.06);
+        pipeline->color->AddRGBPoint(at(0.55), 0.66, 0.36, 0.28);
+        pipeline->color->AddRGBPoint(at(0.78), 0.92, 0.72, 0.62);
+        pipeline->color->AddRGBPoint(high, 1.0, 0.95, 0.90);
+        pipeline->opacity->AddPoint(low, 0.0);
+        pipeline->opacity->AddPoint(at(0.30), 0.0);
+        pipeline->opacity->AddPoint(at(0.52), 0.10);
+        pipeline->opacity->AddPoint(at(0.78), 0.32);
+        pipeline->opacity->AddPoint(high, 0.52);
         property->ShadeOff();
         property->SetAmbient(0.2);
         property->SetDiffuse(1.0);
@@ -190,23 +265,23 @@ void applyVolumePreset(ViewportPipeline *pipeline,
         break;
     case MedicalViewportItem::VolumePreset::ChestContrastPreset:
     default:
-        pipeline->color->AddRGBPoint(-3024.0, 0.0, 0.0, 0.0);
-        pipeline->color->AddRGBPoint(67.0106, 0.54902, 0.25098, 0.14902);
-        pipeline->color->AddRGBPoint(251.105, 0.882353, 0.603922, 0.290196);
-        pipeline->color->AddRGBPoint(439.291, 1.0, 0.937033, 0.954531);
-        pipeline->color->AddRGBPoint(3071.0, 0.827451, 0.658824, 1.0);
-        pipeline->opacity->AddPoint(-3024.0, 0.0);
-        pipeline->opacity->AddPoint(67.0106, 0.0);
-        pipeline->opacity->AddPoint(251.105, 0.446429);
-        pipeline->opacity->AddPoint(439.291, 0.625);
-        pipeline->opacity->AddPoint(3071.0, 0.616071);
+        pipeline->color->AddRGBPoint(low, 0.0, 0.0, 0.0);
+        pipeline->color->AddRGBPoint(at(0.28), 0.55, 0.25, 0.15);
+        pipeline->color->AddRGBPoint(at(0.52), 0.88, 0.60, 0.29);
+        pipeline->color->AddRGBPoint(at(0.76), 1.0, 0.94, 0.95);
+        pipeline->color->AddRGBPoint(high, 0.83, 0.66, 1.0);
+        pipeline->opacity->AddPoint(low, 0.0);
+        pipeline->opacity->AddPoint(at(0.30), 0.0);
+        pipeline->opacity->AddPoint(at(0.52), 0.22);
+        pipeline->opacity->AddPoint(at(0.76), 0.52);
+        pipeline->opacity->AddPoint(high, 0.62);
         break;
     }
 }
 
 void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType type,
                     double slicePosition, double width, double level,
-                    bool showSegmentation)
+                    bool showImage, bool showSegmentation, double segmentationOpacity)
 {
     const int orientation = orientationFor(type);
     const int sliceCount = pipeline->image->GetDimensions()[orientation];
@@ -219,27 +294,28 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
     pipeline->sliceMapper->SetSliceNumber(slice);
     pipeline->sliceActor = vtkSmartPointer<vtkImageSlice>::New();
     pipeline->sliceActor->SetMapper(pipeline->sliceMapper);
-    pipeline->sliceActor->SetUserMatrix(pipeline->dataToWorld);
+    pipeline->sliceActor->SetUserMatrix(pipeline->renderTransform);
     pipeline->sliceActor->GetProperty()->SetColorWindow(width);
     pipeline->sliceActor->GetProperty()->SetColorLevel(level);
     pipeline->sliceActor->GetProperty()->SetInterpolationTypeToLinear();
+    pipeline->sliceActor->SetVisibility(showImage);
     pipeline->renderer->AddViewProp(pipeline->sliceActor);
 
     if (pipeline->mask) {
-        vtkNew<vtkLookupTable> lookup;
-        lookup->SetNumberOfTableValues(2);
-        lookup->SetRange(0.0, 1.0);
-        lookup->SetTableValue(0, 0.0, 0.0, 0.0, 0.0);
-        lookup->SetTableValue(1, 0.95, 0.38, 0.08, 0.72);
-        lookup->Build();
+        pipeline->maskLookup = vtkSmartPointer<vtkLookupTable>::New();
+        pipeline->maskLookup->SetNumberOfTableValues(2);
+        pipeline->maskLookup->SetRange(0.0, 1.0);
+        pipeline->maskLookup->SetTableValue(0, 0.0, 0.0, 0.0, 0.0);
+        pipeline->maskLookup->SetTableValue(1, 0.95, 0.38, 0.08, segmentationOpacity);
+        pipeline->maskLookup->Build();
         pipeline->maskMapper = vtkSmartPointer<vtkImageSliceMapper>::New();
         pipeline->maskMapper->SetInputData(pipeline->mask);
         pipeline->maskMapper->SetOrientation(orientation);
         pipeline->maskMapper->SetSliceNumber(slice);
         pipeline->maskActor = vtkSmartPointer<vtkImageSlice>::New();
         pipeline->maskActor->SetMapper(pipeline->maskMapper);
-        pipeline->maskActor->SetUserMatrix(pipeline->dataToWorld);
-        pipeline->maskActor->GetProperty()->SetLookupTable(lookup);
+        pipeline->maskActor->SetUserMatrix(pipeline->renderTransform);
+        pipeline->maskActor->GetProperty()->SetLookupTable(pipeline->maskLookup);
         pipeline->maskActor->GetProperty()->UseLookupTableScalarRangeOn();
         pipeline->maskActor->SetVisibility(showSegmentation);
         pipeline->renderer->AddViewProp(pipeline->maskActor);
@@ -248,7 +324,8 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
 
 void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
                      double cropMaximum, MedicalViewportItem::VolumePreset preset,
-                     bool showSegmentation)
+                     bool showImage, bool showSegmentation, double segmentationOpacity,
+                     double windowWidth, double windowLevel)
 {
     pipeline->volumeMapper = vtkSmartPointer<vtkGPUVolumeRayCastMapper>::New();
     pipeline->volumeMapper->SetInputData(pipeline->image);
@@ -273,12 +350,13 @@ void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
     pipeline->volumeProperty->SetColor(pipeline->color);
     pipeline->volumeProperty->SetScalarOpacity(pipeline->opacity);
     pipeline->volumeProperty->SetInterpolationTypeToLinear();
-    applyVolumePreset(pipeline, preset, mip);
+    applyVolumePreset(pipeline, preset, mip, windowWidth, windowLevel);
 
     pipeline->volumeActor = vtkSmartPointer<vtkVolume>::New();
     pipeline->volumeActor->SetMapper(pipeline->volumeMapper);
     pipeline->volumeActor->SetProperty(pipeline->volumeProperty);
-    pipeline->volumeActor->SetUserMatrix(pipeline->dataToWorld);
+    pipeline->volumeActor->SetUserMatrix(pipeline->renderTransform);
+    pipeline->volumeActor->SetVisibility(showImage);
     pipeline->renderer->AddVolume(pipeline->volumeActor);
 
     if (pipeline->mask) {
@@ -294,9 +372,9 @@ void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
         mapper->ScalarVisibilityOff();
         pipeline->segmentationActor = vtkSmartPointer<vtkActor>::New();
         pipeline->segmentationActor->SetMapper(mapper);
-        pipeline->segmentationActor->SetUserMatrix(pipeline->dataToWorld);
+        pipeline->segmentationActor->SetUserMatrix(pipeline->renderTransform);
         pipeline->segmentationActor->GetProperty()->SetColor(0.95, 0.38, 0.08);
-        pipeline->segmentationActor->GetProperty()->SetOpacity(0.82);
+        pipeline->segmentationActor->GetProperty()->SetOpacity(segmentationOpacity);
         pipeline->segmentationActor->GetProperty()->SetAmbient(0.34);
         pipeline->segmentationActor->GetProperty()->SetDiffuse(0.66);
         pipeline->segmentationActor->GetProperty()->SetSpecular(0.12);
@@ -310,8 +388,11 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
                      const std::shared_ptr<const MaskSnapshot> &mask,
                      MedicalViewportItem::ViewType type, double slicePosition,
                      bool mip, MedicalViewportItem::VolumePreset preset,
-                     bool showSegmentation, double cropMinimum,
-                     double cropMaximum, double width, double level)
+                     bool projectionData, bool showImage, bool showSegmentation,
+                     double segmentationOpacity, int rotationQuarterTurns,
+                     bool flipHorizontal, bool flipVertical, double cropMinimum,
+                     double cropMaximum, double width, double level,
+                     const QString &patientOrientation)
 {
     pipeline->renderer->RemoveAllViewProps();
     pipeline->image = nullptr;
@@ -320,6 +401,7 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
     pipeline->sliceActor = nullptr;
     pipeline->maskMapper = nullptr;
     pipeline->maskActor = nullptr;
+    pipeline->maskLookup = nullptr;
     pipeline->volumeMapper = nullptr;
     pipeline->volumeProperty = nullptr;
     pipeline->volumeActor = nullptr;
@@ -330,14 +412,24 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
 
     pipeline->image = vtkImageFromVolume(*volume);
     updatePatientTransform(pipeline, *volume);
+    pipeline->renderTransform = displayTransformFor(*volume, projectionData,
+                                                     patientOrientation,
+                                                     rotationQuarterTurns,
+                                                     flipHorizontal, flipVertical);
+    auto combined = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(pipeline->dataToWorld, pipeline->renderTransform, combined);
+    pipeline->renderTransform = combined;
+    pipeline->worldToRenderData = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(pipeline->renderTransform, pipeline->worldToRenderData);
     if (mask && mask->dimensions == volume->dimensions)
         pipeline->mask = vtkImageFromMask(*mask);
 
     if (type == MedicalViewportItem::ViewType::Volume3D)
         configureVolume(pipeline, mip, cropMinimum, cropMaximum, preset,
-                        showSegmentation);
+                        showImage, showSegmentation, segmentationOpacity, width, level);
     else
-        configureSlice(pipeline, type, slicePosition, width, level, showSegmentation);
+        configureSlice(pipeline, type, slicePosition, width, level, showImage,
+                       showSegmentation, segmentationOpacity);
 
     if (renderWindow->GetInteractor()) {
         renderWindow->GetInteractor()->SetDesiredUpdateRate(30.0);
@@ -406,9 +498,17 @@ QQuickVTKItem::vtkUserData MedicalViewportItem::initializeVTK(vtkRenderWindow *r
 
     const double width = m_controller ? m_controller->windowWidth() : 400.0;
     const double level = m_controller ? m_controller->windowLevel() : 40.0;
+    const bool projectionData = m_controller && m_controller->projectionData();
+    const QString patientOrientation = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
+                              : m_controller->patientOrientation())
+        : QString();
     rebuildPipeline(pipeline, renderWindow, m_volume, m_mask, m_viewType,
-                    m_slicePosition, m_mip, m_volumePreset, m_showSegmentation,
-                    m_cropMinimum, m_cropMaximum, width, level);
+                    m_slicePosition, m_mip, m_volumePreset, projectionData,
+                    m_showImage, m_showSegmentation, m_segmentationOpacity,
+                    m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical,
+                    m_cropMinimum, m_cropMaximum, width, level,
+                    patientOrientation);
     return pipeline;
 }
 
@@ -477,6 +577,62 @@ void MedicalViewportItem::setShowSegmentation(bool visible)
     updateRenderState();
 }
 
+void MedicalViewportItem::setPairedProjection(bool paired)
+{
+    if (m_pairedProjection == paired)
+        return;
+    m_pairedProjection = paired;
+    emit pairedProjectionChanged();
+    reloadData();
+}
+
+void MedicalViewportItem::setShowImage(bool visible)
+{
+    if (m_showImage == visible)
+        return;
+    m_showImage = visible;
+    emit showImageChanged();
+    updateRenderState();
+}
+
+void MedicalViewportItem::setSegmentationOpacity(double opacity)
+{
+    opacity = std::clamp(opacity, 0.0, 1.0);
+    if (qFuzzyCompare(m_segmentationOpacity, opacity))
+        return;
+    m_segmentationOpacity = opacity;
+    emit segmentationOpacityChanged();
+    updateRenderState();
+}
+
+void MedicalViewportItem::setRotationQuarterTurns(int turns)
+{
+    turns = ((turns % 4) + 4) % 4;
+    if (m_rotationQuarterTurns == turns)
+        return;
+    m_rotationQuarterTurns = turns;
+    emit orientationChanged();
+    reloadData();
+}
+
+void MedicalViewportItem::setFlipHorizontal(bool flipped)
+{
+    if (m_flipHorizontal == flipped)
+        return;
+    m_flipHorizontal = flipped;
+    emit orientationChanged();
+    reloadData();
+}
+
+void MedicalViewportItem::setFlipVertical(bool flipped)
+{
+    if (m_flipVertical == flipped)
+        return;
+    m_flipVertical = flipped;
+    emit orientationChanged();
+    reloadData();
+}
+
 void MedicalViewportItem::setCropMinimum(double value)
 {
     value = std::clamp(value, 0.0, m_cropMaximum - 0.01);
@@ -514,7 +670,7 @@ void MedicalViewportItem::pickVoxel(double itemX, double itemY)
                    (vtkRenderWindow *window, vtkUserData userData) {
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (!pipeline || !pipeline->renderer || !pipeline->sliceActor
-            || !pipeline->image || !pipeline->worldToData || !view || !controller)
+            || !pipeline->image || !pipeline->worldToRenderData || !view || !controller)
             return;
 
         const int *renderSize = window->GetSize();
@@ -540,7 +696,7 @@ void MedicalViewportItem::pickVoxel(double itemX, double itemY)
         worldPoint[1] = world[1];
         worldPoint[2] = world[2];
         worldPoint[3] = 1.0;
-        pipeline->worldToData->MultiplyPoint(worldPoint, dataPoint);
+        pipeline->worldToRenderData->MultiplyPoint(worldPoint, dataPoint);
         pipeline->image->TransformPhysicalPointToContinuousIndex(dataPoint, continuousIndex);
         const int *dimensions = pipeline->image->GetDimensions();
         std::array<int, 3> index {
@@ -565,26 +721,44 @@ void MedicalViewportItem::pickVoxel(double itemX, double itemY)
 
 void MedicalViewportItem::reloadData()
 {
-    m_volume = m_controller ? m_controller->volumeSnapshot() : nullptr;
-    m_mask = m_controller ? m_controller->maskSnapshot() : nullptr;
+    m_volume = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairSnapshot()
+                              : m_controller->volumeSnapshot())
+        : nullptr;
+    m_mask = (m_controller && !m_pairedProjection)
+        ? m_controller->maskSnapshot() : nullptr;
     const auto volume = m_volume;
     const auto mask = m_mask;
     const auto type = m_viewType;
     const double slice = m_slicePosition;
     const bool mipMode = m_mip;
     const auto preset = m_volumePreset;
+    const bool projectionData = m_controller && m_controller->projectionData();
+    const bool showImage = m_showImage;
     const bool segmentation = m_showSegmentation;
+    const double segmentationOpacity = m_segmentationOpacity;
+    const int rotationQuarterTurns = m_rotationQuarterTurns;
+    const bool flipHorizontal = m_flipHorizontal;
+    const bool flipVertical = m_flipVertical;
     const double cropMin = m_cropMinimum;
     const double cropMax = m_cropMaximum;
     const double width = m_controller ? m_controller->windowWidth() : 400.0;
     const double level = m_controller ? m_controller->windowLevel() : 40.0;
-    dispatch_async([volume, mask, type, slice, mipMode, preset, segmentation,
-                    cropMin, cropMax, width, level](vtkRenderWindow *window,
+    const QString patientOrientation = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
+                              : m_controller->patientOrientation())
+        : QString();
+    dispatch_async([volume, mask, type, slice, mipMode, preset, projectionData,
+                    showImage, segmentation, segmentationOpacity,
+                    rotationQuarterTurns, flipHorizontal, flipVertical,
+                    cropMin, cropMax, width, level, patientOrientation](vtkRenderWindow *window,
                                                    vtkUserData userData) {
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (pipeline)
             rebuildPipeline(pipeline, window, volume, mask, type, slice, mipMode, preset,
-                            segmentation, cropMin, cropMax, width, level);
+                            projectionData, showImage, segmentation, segmentationOpacity,
+                            rotationQuarterTurns, flipHorizontal, flipVertical,
+                            cropMin, cropMax, width, level, patientOrientation);
     });
     scheduleRender();
 }
@@ -593,15 +767,18 @@ void MedicalViewportItem::updateRenderState()
 {
     const int orientation = orientationFor(m_viewType);
     const double slicePosition = m_slicePosition;
+    const bool showImage = m_showImage;
     const bool segmentation = m_showSegmentation;
+    const double segmentationOpacity = m_segmentationOpacity;
     const bool mipMode = m_mip;
     const auto preset = m_volumePreset;
     const double cropMin = m_cropMinimum;
     const double cropMax = m_cropMaximum;
     const double width = m_controller ? m_controller->windowWidth() : 400.0;
     const double level = m_controller ? m_controller->windowLevel() : 40.0;
-    dispatch_async([orientation, slicePosition, segmentation, mipMode, preset,
-                    cropMin, cropMax, width, level](vtkRenderWindow *, vtkUserData userData) {
+    dispatch_async([orientation, slicePosition, showImage, segmentation,
+                    segmentationOpacity, mipMode, preset, cropMin, cropMax,
+                    width, level](vtkRenderWindow *, vtkUserData userData) {
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (!pipeline)
             return;
@@ -610,6 +787,7 @@ void MedicalViewportItem::updateRenderState()
             const int slice = std::clamp(static_cast<int>(slicePosition * (count - 1)),
                                          0, std::max(0, count - 1));
             pipeline->sliceMapper->SetSliceNumber(slice);
+            pipeline->sliceActor->SetVisibility(showImage);
             pipeline->sliceActor->GetProperty()->SetColorWindow(width);
             pipeline->sliceActor->GetProperty()->SetColorLevel(level);
             if (pipeline->maskMapper)
@@ -617,8 +795,17 @@ void MedicalViewportItem::updateRenderState()
         }
         if (pipeline->maskActor)
             pipeline->maskActor->SetVisibility(segmentation);
+        if (pipeline->maskLookup) {
+            pipeline->maskLookup->SetTableValue(1, 0.95, 0.38, 0.08,
+                                                 segmentationOpacity);
+            pipeline->maskLookup->Build();
+        }
         if (pipeline->segmentationActor)
             pipeline->segmentationActor->SetVisibility(segmentation);
+        if (pipeline->segmentationActor)
+            pipeline->segmentationActor->GetProperty()->SetOpacity(segmentationOpacity);
+        if (pipeline->volumeActor)
+            pipeline->volumeActor->SetVisibility(showImage);
         if (pipeline->volumeMapper && pipeline->image) {
             if (mipMode)
                 pipeline->volumeMapper->SetBlendModeToMaximumIntensity();
@@ -631,7 +818,7 @@ void MedicalViewportItem::updateRenderState()
             pipeline->volumeMapper->SetCroppingRegionPlanes(
                 bounds[0], bounds[1], bounds[2], bounds[3], zMin, zMax);
             pipeline->volumeMapper->SetCropping(cropMin > 0.0 || cropMax < 1.0);
-            applyVolumePreset(pipeline, preset, mipMode);
+            applyVolumePreset(pipeline, preset, mipMode, width, level);
         }
     });
     scheduleRender();

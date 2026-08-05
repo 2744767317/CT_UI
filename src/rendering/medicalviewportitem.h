@@ -19,6 +19,12 @@ class MedicalViewportItem : public MedicalViewportBase
     Q_PROPERTY(bool mip READ mip WRITE setMip NOTIFY mipChanged)
     Q_PROPERTY(VolumePreset volumePreset READ volumePreset WRITE setVolumePreset NOTIFY volumePresetChanged)
     Q_PROPERTY(bool showSegmentation READ showSegmentation WRITE setShowSegmentation NOTIFY showSegmentationChanged)
+    Q_PROPERTY(bool pairedProjection READ pairedProjection WRITE setPairedProjection NOTIFY pairedProjectionChanged)
+    Q_PROPERTY(bool showImage READ showImage WRITE setShowImage NOTIFY showImageChanged)
+    Q_PROPERTY(double segmentationOpacity READ segmentationOpacity WRITE setSegmentationOpacity NOTIFY segmentationOpacityChanged)
+    Q_PROPERTY(int rotationQuarterTurns READ rotationQuarterTurns WRITE setRotationQuarterTurns NOTIFY orientationChanged)
+    Q_PROPERTY(bool flipHorizontal READ flipHorizontal WRITE setFlipHorizontal NOTIFY orientationChanged)
+    Q_PROPERTY(bool flipVertical READ flipVertical WRITE setFlipVertical NOTIFY orientationChanged)
     Q_PROPERTY(double cropMinimum READ cropMinimum WRITE setCropMinimum NOTIFY cropChanged)
     Q_PROPERTY(double cropMaximum READ cropMaximum WRITE setCropMaximum NOTIFY cropChanged)
 
@@ -41,6 +47,12 @@ public:
     bool mip() const { return m_mip; }
     VolumePreset volumePreset() const { return m_volumePreset; }
     bool showSegmentation() const { return m_showSegmentation; }
+    bool pairedProjection() const { return m_pairedProjection; }
+    bool showImage() const { return m_showImage; }
+    double segmentationOpacity() const { return m_segmentationOpacity; }
+    int rotationQuarterTurns() const { return m_rotationQuarterTurns; }
+    bool flipHorizontal() const { return m_flipHorizontal; }
+    bool flipVertical() const { return m_flipVertical; }
     double cropMinimum() const { return m_cropMinimum; }
     double cropMaximum() const { return m_cropMaximum; }
 
@@ -50,6 +62,12 @@ public:
     void setMip(bool mip);
     void setVolumePreset(VolumePreset preset);
     void setShowSegmentation(bool visible);
+    void setPairedProjection(bool paired);
+    void setShowImage(bool visible);
+    void setSegmentationOpacity(double opacity);
+    void setRotationQuarterTurns(int turns);
+    void setFlipHorizontal(bool flipped);
+    void setFlipVertical(bool flipped);
     void setCropMinimum(double value);
     void setCropMaximum(double value);
     Q_INVOKABLE void pickVoxel(double itemX, double itemY);
@@ -61,6 +79,10 @@ signals:
     void mipChanged();
     void volumePresetChanged();
     void showSegmentationChanged();
+    void pairedProjectionChanged();
+    void showImageChanged();
+    void segmentationOpacityChanged();
+    void orientationChanged();
     void cropChanged();
     void voxelPicked(int voxelX, int voxelY, int voxelZ, int hu,
                      double normalizedX, double normalizedY);
@@ -89,4 +111,10 @@ private:
     bool m_mip = false;
     VolumePreset m_volumePreset = VolumePreset::BonePreset;
     bool m_showSegmentation = true;
+    bool m_pairedProjection = false;
+    bool m_showImage = true;
+    double m_segmentationOpacity = 0.72;
+    int m_rotationQuarterTurns = 0;
+    bool m_flipHorizontal = false;
+    bool m_flipVertical = false;
 };

@@ -8,6 +8,19 @@ Rectangle {
     signal requestFolderImport()
     signal requestFileImport()
     signal requestExport()
+    signal imageVisibilityRequested(bool visible)
+    signal segmentationVisibilityRequested(bool visible)
+    signal measurementVisibilityRequested(bool visible)
+    signal segmentationOpacityRequested(real opacity)
+    signal layerSelected(string layerId)
+
+    property bool imageVisible: true
+    property bool segmentationVisible: true
+    property bool measurementsVisible: true
+    property real segmentationOpacity: 0.72
+    property string selectedLayer: "image"
+    property int pendingRemoveVolume: -1
+
     color: Theme.panel
     border.color: Theme.border
 
@@ -18,7 +31,7 @@ Rectangle {
 
         Text { text: "当前检查"; color: Theme.text; font.pixelSize: 17; font.weight: Font.DemiBold }
         Text { text: medicalData.patientName; color: Theme.text; font.pixelSize: 20; font.weight: Font.DemiBold; elide: Text.ElideRight; Layout.fillWidth: true }
-        Text { text: medicalData.patientId + " · " + medicalData.modality; color: Theme.textSecondary; font.pixelSize: 13 }
+        Text { text: medicalData.patientId + "  ·  " + medicalData.modality; color: Theme.textSecondary; font.pixelSize: 13 }
 
         RowLayout {
             Layout.fillWidth: true
@@ -29,37 +42,195 @@ Rectangle {
         }
 
         Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
-        Text { text: "数据与派生对象"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
-
+        Text { text: "数据集"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
         ListView {
+            id: volumeList
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            Layout.preferredHeight: 168
             clip: true
-            model: [
-                [medicalData.patientName, 0, true],
-                [medicalData.studyDescription, 1, true],
-                [medicalData.seriesDescription, 2, true],
-                [medicalData.dimensionsText, 3, false],
-                [medicalData.segmentationAvailable ? "Segmentation · 可见" : "Segmentation · 空", 2, medicalData.segmentationAvailable],
-                ["Measurements", 2, false]
-            ]
+            spacing: 3
+            model: medicalData.volumeNodes
             delegate: Rectangle {
                 required property var modelData
                 required property int index
                 width: ListView.view.width
-                height: 36
-                color: index === 2 ? Theme.control : "transparent"
-                Text {
-                    anchors.left: parent.left
-                    anchors.leftMargin: 8 + modelData[1] * 16
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: (modelData[2] ? "●  " : "○  ") + modelData[0]
-                    color: modelData[2] ? Theme.text : Theme.textMuted
-                    font.pixelSize: 13
-                    elide: Text.ElideRight
+                height: 50
+                color: modelData.active ? Theme.control
+                                        : (nodeMouse.containsMouse ? Theme.panelRaised : "transparent")
+                border.color: modelData.active ? Theme.accent : Theme.border
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 8
+                    spacing: 6
+                    CheckBox {
+                        checked: modelData.visible
+                        onClicked: medicalData.setVolumeVisibility(index, checked)
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 1
+                        Text {
+                            Layout.fillWidth: true
+                            text: modelData.name
+                            color: modelData.visible ? Theme.text : Theme.textMuted
+                            font.pixelSize: 13
+                            font.weight: modelData.active ? Font.DemiBold : Font.Normal
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: modelData.modality + "  ·  " + modelData.dimensions
+                            color: Theme.textSecondary
+                            font.pixelSize: 11
+                            elide: Text.ElideRight
+                        }
+                    }
+                    Text {
+                        text: modelData.segmentation ? "SEG" : (modelData.pairedProjection ? "PAIR" : "VOL")
+                        color: modelData.segmentation ? Theme.accent : Theme.textMuted
+                        font.pixelSize: 10
+                    }
+                }
+                HoverHandler { id: nodeMouse }
+                TapHandler {
+                    acceptedButtons: Qt.LeftButton
+                    onTapped: medicalData.selectVolume(index)
                 }
             }
+            Text {
+                visible: volumeList.count === 0
+                anchors.centerIn: parent
+                text: "尚未载入 Volume"
+                color: Theme.textMuted
+                font.pixelSize: 12
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            ActionButton {
+                text: "重命名"
+                Layout.fillWidth: true
+                enabled: medicalData.selectedVolumeIndex >= 0
+                onClicked: {
+                    renameField.text = medicalData.volumeNodes[medicalData.selectedVolumeIndex].name
+                    renameRow.visible = true
+                    renameField.forceActiveFocus()
+                    renameField.selectAll()
+                }
+            }
+            ActionButton {
+                text: "移除"
+                Layout.fillWidth: true
+                enabled: medicalData.selectedVolumeIndex >= 0
+                onClicked: {
+                    root.pendingRemoveVolume = medicalData.selectedVolumeIndex
+                    removeDialog.open()
+                }
+            }
+        }
+
+        RowLayout {
+            id: renameRow
+            Layout.fillWidth: true
+            visible: false
+            TextField {
+                id: renameField
+                Layout.fillWidth: true
+                selectByMouse: true
+                onAccepted: {
+                    if (medicalData.renameVolume(medicalData.selectedVolumeIndex, text))
+                        renameRow.visible = false
+                }
+            }
+            ActionButton {
+                text: "保存"
+                onClicked: {
+                    if (medicalData.renameVolume(medicalData.selectedVolumeIndex, renameField.text))
+                        renameRow.visible = false
+                }
+            }
+        }
+
+        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+        Text { text: "图层"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+
+            Rectangle {
+                Layout.fillWidth: true
+                height: 38
+                color: root.selectedLayer === "image" ? Theme.control
+                                                        : (imageLayerMouse.containsMouse ? Theme.control : "transparent")
+                border.color: Theme.border
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 6
+                    spacing: 6
+                    CheckBox {
+                        checked: root.imageVisible
+                        enabled: medicalData.loaded
+                        onToggled: root.imageVisibilityRequested(checked)
+                    }
+                    Text { text: "原始影像"; color: Theme.text; Layout.fillWidth: true; font.pixelSize: 13 }
+                    Text { text: medicalData.modality; color: Theme.textSecondary; font.pixelSize: 11 }
+                }
+                MouseArea { id: imageLayerMouse; anchors.fill: parent; z: -1; hoverEnabled: true; onClicked: { root.selectedLayer = "image"; root.layerSelected("image") } }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                height: 38
+                color: root.selectedLayer === "segmentation" ? Theme.control
+                                                               : (segmentationLayerMouse.containsMouse ? Theme.control : "transparent")
+                border.color: Theme.border
+                opacity: medicalData.segmentationAvailable ? 1.0 : 0.55
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 6
+                    spacing: 6
+                    CheckBox {
+                        checked: root.segmentationVisible
+                        enabled: medicalData.segmentationAvailable
+                        onToggled: root.segmentationVisibilityRequested(checked)
+                    }
+                    Text { text: "分割结果"; color: Theme.text; Layout.fillWidth: true; font.pixelSize: 13 }
+                    Text { text: medicalData.segmentationAvailable ? "ITK" : "空"; color: Theme.textSecondary; font.pixelSize: 11 }
+                }
+                MouseArea { id: segmentationLayerMouse; anchors.fill: parent; z: -1; hoverEnabled: true; onClicked: { root.selectedLayer = "segmentation"; root.layerSelected("segmentation") } }
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                height: 38
+                color: root.selectedLayer === "measurements" ? Theme.control
+                                                               : (measurementLayerMouse.containsMouse ? Theme.control : "transparent")
+                border.color: Theme.border
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 6
+                    spacing: 6
+                    CheckBox {
+                        checked: root.measurementsVisible
+                        onToggled: root.measurementVisibilityRequested(checked)
+                    }
+                    Text { text: "测量与标注"; color: Theme.text; Layout.fillWidth: true; font.pixelSize: 13 }
+                    Text { text: "局部"; color: Theme.textSecondary; font.pixelSize: 11 }
+                }
+                MouseArea { id: measurementLayerMouse; anchors.fill: parent; z: -1; hoverEnabled: true; onClicked: { root.selectedLayer = "measurements"; root.layerSelected("measurements") } }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            visible: medicalData.segmentationAvailable
+            Text { text: "分割不透明度"; color: Theme.textSecondary; font.pixelSize: 12 }
+            Slider { Layout.fillWidth: true; from: 0.1; to: 1.0; value: root.segmentationOpacity; onMoved: root.segmentationOpacityRequested(value) }
         }
 
         Rectangle {
@@ -77,6 +248,27 @@ Rectangle {
                 font.pixelSize: 12
                 wrapMode: Text.WordWrap
             }
+        }
+        Item { Layout.fillHeight: true }
+    }
+
+    Dialog {
+        id: removeDialog
+        anchors.centerIn: parent
+        modal: true
+        title: "从工作区移除 Volume"
+        standardButtons: Dialog.Cancel | Dialog.Ok
+        onAccepted: {
+            medicalData.removeVolume(root.pendingRemoveVolume)
+            root.pendingRemoveVolume = -1
+        }
+        onRejected: root.pendingRemoveVolume = -1
+        contentItem: Text {
+            width: 260
+            text: "仅从当前工作区移除，不会删除原始 DICOM 文件。"
+            color: Theme.text
+            font.pixelSize: 13
+            wrapMode: Text.WordWrap
         }
     }
 }

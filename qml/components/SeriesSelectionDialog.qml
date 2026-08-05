@@ -75,7 +75,7 @@ Dialog {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 3
                 Text { text: "选择患者与影像序列"; color: Theme.text; font.pixelSize: 20; font.weight: Font.DemiBold }
-                Text { text: "同一目录可包含多个患者、CT 重建序列和 X 线投影"; color: Theme.textSecondary; font.pixelSize: 13 }
+                Text { text: "同一目录可连续载入多个患者、CT Volume 和 X 线投影"; color: Theme.textSecondary; font.pixelSize: 13 }
             }
         }
 
@@ -200,7 +200,6 @@ Dialog {
                     onClicked: root.selectedIndex = index
                     onDoubleClicked: {
                         root.selectedIndex = index
-                        root.close()
                         medicalData.selectSeries(index)
                     }
                 }
@@ -219,16 +218,12 @@ Dialog {
                 color: Theme.textSecondary
                 font.pixelSize: 13
             }
-            ActionButton { text: "取消"; onClicked: root.close() }
+            ActionButton { text: medicalData.volumeNodes.length > 0 ? "完成" : "取消"; onClicked: root.close() }
             ActionButton {
-                text: "载入所选影像"
+                text: "加入工作区"
                 primary: true
                 enabled: root.selectedIndex >= 0
-                onClicked: {
-                    const index = root.selectedIndex
-                    root.close()
-                    medicalData.selectSeries(index)
-                }
+                onClicked: medicalData.selectSeries(root.selectedIndex)
             }
         }
     }

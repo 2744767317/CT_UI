@@ -17,6 +17,7 @@ class CoreTests final : public QObject
 private slots:
     void workflowGuardsFutureSteps();
     void demoVolumeAndThresholdAreAvailable();
+    void volumeNodeLifecycle();
     void regionGrowingSeedStateAndValidation();
     void realDicomRoundTripWhenConfigured();
     void recursiveLidcRootLoadsCtAndDx();
@@ -56,6 +57,30 @@ void CoreTests::demoVolumeAndThresholdAreAvailable()
     QVERIFY(mask);
     QVERIFY(std::any_of(mask->pixels.cbegin(), mask->pixels.cend(),
                         [](unsigned char value) { return value != 0; }));
+}
+
+void CoreTests::volumeNodeLifecycle()
+{
+    MedicalDataController data;
+    data.loadDemoVolume();
+    QCOMPARE(data.volumeNodes().size(), 1);
+    QCOMPARE(data.selectedVolumeIndex(), 0);
+    QVERIFY(data.activeVolumeVisible());
+
+    QVERIFY(data.renameVolume(0, QStringLiteral("Renamed CT")));
+    QCOMPARE(data.seriesDescription(), QStringLiteral("Renamed CT"));
+    QCOMPARE(data.volumeNodes().front().toMap().value(QStringLiteral("name")).toString(),
+             QStringLiteral("Renamed CT"));
+
+    QVERIFY(data.setVolumeVisibility(0, false));
+    QVERIFY(!data.activeVolumeVisible());
+    QVERIFY(data.setVolumeVisibility(0, true));
+    QVERIFY(data.activeVolumeVisible());
+
+    QVERIFY(data.removeVolume(0));
+    QVERIFY(!data.loaded());
+    QVERIFY(data.volumeNodes().isEmpty());
+    QCOMPARE(data.selectedVolumeIndex(), -1);
 }
 
 void CoreTests::regionGrowingSeedStateAndValidation()
@@ -146,6 +171,11 @@ void CoreTests::recursiveLidcRootLoadsCtAndDx()
     QVERIFY(!data.volumeData());
     QCOMPARE(data.modality(), QStringLiteral("DX"));
     QCOMPARE(data.volumeSnapshot()->dimensions[2], 1);
+    QCOMPARE(data.volumeNodes().size(), 2);
+    QVERIFY(data.selectVolume(0));
+    QCOMPARE(data.modality(), QStringLiteral("CT"));
+    QVERIFY(data.selectVolume(1));
+    QCOMPARE(data.modality(), QStringLiteral("DX"));
 #else
     QSKIP("The MinGW UI compatibility build does not link the medical backend.");
 #endif
@@ -178,6 +208,10 @@ void CoreTests::mixedRootLoadsUnsignedDx()
     QVERIFY(data.windowWidth() > 1000.0);
     QVERIFY(data.volumeSnapshot()->dimensions[0] > 1000);
     QVERIFY(data.volumeSnapshot()->dimensions[1] > 1000);
+    QVERIFY(data.projectionData());
+    QVERIFY(data.pairedProjectionAvailable());
+    QVERIFY(!data.projectionViewLabel().isEmpty());
+    QVERIFY(!data.projectionPairViewLabel().isEmpty());
 
     QTemporaryDir exportDirectory;
     QVERIFY(exportDirectory.isValid());

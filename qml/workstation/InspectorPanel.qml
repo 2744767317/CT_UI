@@ -12,11 +12,22 @@ Rectangle {
     property bool seedPicking: false
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
+    property int rotationQuarterTurns: 0
+    property bool flipHorizontal: false
+    property bool flipVertical: false
+    property bool activeProjection: false
+    property string projectionViewLabel: medicalData.projectionViewLabel
+    property string projectionOrientation: medicalData.patientOrientation
+    property string projectionSopClassName: medicalData.sopClassName
+    property string projectionImageType: medicalData.imageType
     signal mipRequested(bool enabled)
     signal volumePresetRequested(int preset)
     signal seedPickingRequested(bool enabled)
     signal segmentationVisibilityRequested(bool visible)
     signal cropRequested(real minimum, real maximum)
+    signal rotationRequested(int turns)
+    signal flipHorizontalRequested(bool flipped)
+    signal flipVerticalRequested(bool flipped)
     signal requestExport()
     color: Theme.panel
     border.color: Theme.border
@@ -32,14 +43,15 @@ Rectangle {
             id: tabs
             Layout.fillWidth: true
             TabButton { text: "查看" }
-            TabButton { text: "分割" }
+            TabButton { text: "分割"; enabled: root.ctMode }
             TabButton { text: "3D"; enabled: medicalData.volumeData }
             TabButton { text: "导出" }
         }
         Connections {
             target: medicalData
             function onDataChanged() {
-                if (!medicalData.volumeData && tabs.currentIndex === 2)
+                if ((!medicalData.volumeData && tabs.currentIndex === 2)
+                    || (!root.ctMode && tabs.currentIndex === 1))
                     tabs.currentIndex = 0
             }
         }
@@ -61,39 +73,81 @@ Rectangle {
                     Slider {
                         Layout.fillWidth: true
                         from: 1
-                        to: root.ctMode ? 3000 : 65535
+                        to: root.ctMode ? 6000 : 65535
                         value: medicalData.windowWidth
                         onMoved: medicalData.windowWidth = value
                     }
-                    Text { text: "窗位  " + Math.round(medicalData.windowLevel); color: Theme.textSecondary; font.pixelSize: 13 }
+                    Text { text: "窗位  " + Math.round(medicalData.displayWindowLevel); color: Theme.textSecondary; font.pixelSize: 13 }
                     Slider {
                         Layout.fillWidth: true
-                        from: root.ctMode ? -1200 : -32768
-                        to: root.ctMode ? 1800 : 32767
-                        value: medicalData.windowLevel
-                        onMoved: medicalData.windowLevel = value
+                        from: root.ctMode ? -2000 : (medicalData.projectionUnsigned ? 0 : -32768)
+                        to: root.ctMode ? 3000 : (medicalData.projectionUnsigned ? 65535 : 32767)
+                        value: medicalData.displayWindowLevel
+                        onMoved: medicalData.windowLevel = value - (root.ctMode || !medicalData.projectionUnsigned ? 0 : 32768)
                     }
                     Text { text: "预设"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
                     ComboBox {
                         Layout.fillWidth: true
                         model: root.ctMode
                             ? ["软组织  W400 / L40", "肺窗  W1500 / L-600", "骨窗  W1800 / L400"]
-                            : ["全动态范围  W65535 / L-1", "高对比  W16000 / L0", "低对比  W32000 / L0"]
+                            : ["全动态范围  W65535 / L32767", "高对比  W16000 / L32767", "低对比  W32000 / L16384"]
                         onActivated: index => {
                             if (root.ctMode) {
                                 if (index === 0) { medicalData.windowWidth = 400; medicalData.windowLevel = 40 }
                                 if (index === 1) { medicalData.windowWidth = 1500; medicalData.windowLevel = -600 }
                                 if (index === 2) { medicalData.windowWidth = 1800; medicalData.windowLevel = 400 }
                             } else {
-                                if (index === 0) { medicalData.windowWidth = 65535; medicalData.windowLevel = -1 }
-                                if (index === 1) { medicalData.windowWidth = 16000; medicalData.windowLevel = 0 }
-                                if (index === 2) { medicalData.windowWidth = 32000; medicalData.windowLevel = 0 }
+                                if (index === 0) { medicalData.windowWidth = 65535; medicalData.windowLevel = 32767 - (medicalData.projectionUnsigned ? 32768 : 0) }
+                                if (index === 1) { medicalData.windowWidth = 16000; medicalData.windowLevel = 32767 - (medicalData.projectionUnsigned ? 32768 : 0) }
+                                if (index === 2) { medicalData.windowWidth = 32000; medicalData.windowLevel = 16384 - (medicalData.projectionUnsigned ? 32768 : 0) }
                             }
                         }
                     }
                     Text { text: "图像信息"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
                     Text { text: medicalData.dimensionsText; color: Theme.textSecondary; font.pixelSize: 13 }
                     Text { text: medicalData.spacingText; color: Theme.textSecondary; font.pixelSize: 13 }
+                    Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border; visible: !root.ctMode && medicalData.projectionData }
+                    Text {
+                        visible: !root.ctMode && medicalData.projectionData
+                        text: "DICOM 方向"
+                        color: Theme.text
+                        font.pixelSize: 15
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        visible: !root.ctMode && medicalData.projectionData
+                        Layout.fillWidth: true
+                        text: root.projectionViewLabel + "  ·  " + root.projectionOrientation
+                        color: Theme.textSecondary
+                        font.pixelSize: 13
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        visible: !root.ctMode && medicalData.projectionData
+                        Layout.fillWidth: true
+                        text: root.projectionSopClassName + "\n" + root.projectionImageType
+                        color: Theme.textMuted
+                        font.pixelSize: 11
+                        wrapMode: Text.WordWrap
+                    }
+                    RowLayout {
+                        visible: !root.ctMode && medicalData.projectionData
+                        Layout.fillWidth: true
+                        ActionButton { text: "↶ 90°"; Layout.fillWidth: true; onClicked: root.rotationRequested((root.rotationQuarterTurns + 3) % 4) }
+                        ActionButton { text: "↷ 90°"; Layout.fillWidth: true; onClicked: root.rotationRequested((root.rotationQuarterTurns + 1) % 4) }
+                    }
+                    RowLayout {
+                        visible: !root.ctMode && medicalData.projectionData
+                        Layout.fillWidth: true
+                        ActionButton { text: "水平翻转"; Layout.fillWidth: true; active: root.flipHorizontal; onClicked: root.flipHorizontalRequested(!root.flipHorizontal) }
+                        ActionButton { text: "垂直翻转"; Layout.fillWidth: true; active: root.flipVertical; onClicked: root.flipVerticalRequested(!root.flipVertical) }
+                    }
+                    ActionButton {
+                        visible: !root.ctMode && medicalData.projectionData
+                        text: "恢复 DICOM 方向"
+                        Layout.fillWidth: true
+                        onClicked: { root.rotationRequested(0); root.flipHorizontalRequested(false); root.flipVerticalRequested(false) }
+                    }
                 }
             }
 
@@ -228,10 +282,19 @@ Rectangle {
                         Layout.fillWidth: true
                         text: root.mip
                               ? "MIP 沿观察方向保留最高密度体素。"
-                              : "三维预设使用独立 HU 颜色与透明度曲线，不受二维窗宽窗位影响。"
+                              : "三维颜色与透明度曲线已联动当前窗宽窗位，可用顶部窗宽窗位工具在切片中拖动调整。"
                         color: Theme.textSecondary
                         font.pixelSize: 13
                         wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        visible: !root.mip
+                        Layout.fillWidth: true
+                        text: "3D 映射  W" + Math.round(medicalData.windowWidth)
+                              + " / L" + Math.round(medicalData.displayWindowLevel)
+                        color: Theme.accent
+                        font.pixelSize: 13
+                        font.weight: Font.DemiBold
                     }
                     Text { text: "Z 轴裁剪下界  " + Math.round(root.cropMinimum * 100) + "%"; color: Theme.textSecondary; font.pixelSize: 13 }
                     Slider {

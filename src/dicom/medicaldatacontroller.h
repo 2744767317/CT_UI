@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
 #include <QUrl>
 #include <QVariantList>
 
@@ -28,12 +29,15 @@ struct MaskSnapshot
 };
 
 struct DicomSeriesCandidate;
+struct LoadedVolumeNode;
 
 class MedicalDataController final : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(bool loaded READ loaded NOTIFY dataChanged)
     Q_PROPERTY(bool volumeData READ volumeData NOTIFY dataChanged)
+    Q_PROPERTY(bool projectionData READ projectionData NOTIFY dataChanged)
+    Q_PROPERTY(bool pairedProjectionAvailable READ pairedProjectionAvailable NOTIFY dataChanged)
     Q_PROPERTY(bool segmentationAvailable READ segmentationAvailable NOTIFY segmentationChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString patientName READ patientName NOTIFY dataChanged)
@@ -44,6 +48,14 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(QString studyDescription READ studyDescription NOTIFY dataChanged)
     Q_PROPERTY(QString studyDate READ studyDate NOTIFY dataChanged)
     Q_PROPERTY(QString seriesDescription READ seriesDescription NOTIFY dataChanged)
+    Q_PROPERTY(QString projectionViewLabel READ projectionViewLabel NOTIFY dataChanged)
+    Q_PROPERTY(QString projectionPairViewLabel READ projectionPairViewLabel NOTIFY dataChanged)
+    Q_PROPERTY(QString patientOrientation READ patientOrientation NOTIFY dataChanged)
+    Q_PROPERTY(QString projectionPairOrientation READ projectionPairOrientation NOTIFY dataChanged)
+    Q_PROPERTY(QString imageType READ imageType NOTIFY dataChanged)
+    Q_PROPERTY(QString sopClassName READ sopClassName NOTIFY dataChanged)
+    Q_PROPERTY(QString projectionPairImageType READ projectionPairImageType NOTIFY dataChanged)
+    Q_PROPERTY(QString projectionPairSopClassName READ projectionPairSopClassName NOTIFY dataChanged)
     Q_PROPERTY(QString dimensionsText READ dimensionsText NOTIFY dataChanged)
     Q_PROPERTY(QString spacingText READ spacingText NOTIFY dataChanged)
     Q_PROPERTY(QString sourcePath READ sourcePath NOTIFY dataChanged)
@@ -51,6 +63,8 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY statusChanged)
     Q_PROPERTY(double windowWidth READ windowWidth WRITE setWindowWidth NOTIFY windowingChanged)
     Q_PROPERTY(double windowLevel READ windowLevel WRITE setWindowLevel NOTIFY windowingChanged)
+    Q_PROPERTY(double displayWindowLevel READ displayWindowLevel NOTIFY windowingChanged)
+    Q_PROPERTY(bool projectionUnsigned READ projectionUnsigned NOTIFY dataChanged)
     Q_PROPERTY(int datasetRevision READ datasetRevision NOTIFY dataChanged)
     Q_PROPERTY(int segmentationRevision READ segmentationRevision NOTIFY segmentationChanged)
     Q_PROPERTY(bool regionGrowingSeedValid READ regionGrowingSeedValid NOTIFY regionGrowingSeedChanged)
@@ -60,12 +74,17 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(int regionGrowingSeedValue READ regionGrowingSeedValue NOTIFY regionGrowingSeedChanged)
     Q_PROPERTY(QVariantList seriesChoices READ seriesChoices NOTIFY seriesChoicesChanged)
     Q_PROPERTY(int selectedSeriesIndex READ selectedSeriesIndex NOTIFY selectedSeriesIndexChanged)
+    Q_PROPERTY(QVariantList volumeNodes READ volumeNodes NOTIFY volumeNodesChanged)
+    Q_PROPERTY(int selectedVolumeIndex READ selectedVolumeIndex NOTIFY volumeNodesChanged)
+    Q_PROPERTY(bool activeVolumeVisible READ activeVolumeVisible NOTIFY volumeNodesChanged)
 
 public:
     explicit MedicalDataController(QObject *parent = nullptr);
 
     bool loaded() const;
     bool volumeData() const;
+    bool projectionData() const;
+    bool pairedProjectionAvailable() const;
     bool segmentationAvailable() const;
     bool busy() const { return m_busy; }
     QString patientName() const { return m_patientName; }
@@ -76,6 +95,14 @@ public:
     QString studyDescription() const { return m_studyDescription; }
     QString studyDate() const { return m_studyDate; }
     QString seriesDescription() const { return m_seriesDescription; }
+    QString projectionViewLabel() const { return m_projectionViewLabel; }
+    QString projectionPairViewLabel() const { return m_projectionPairViewLabel; }
+    QString patientOrientation() const { return m_patientOrientation; }
+    QString projectionPairOrientation() const { return m_projectionPairOrientation; }
+    QString imageType() const { return m_imageType; }
+    QString sopClassName() const { return m_sopClassName; }
+    QString projectionPairImageType() const { return m_projectionPairImageType; }
+    QString projectionPairSopClassName() const { return m_projectionPairSopClassName; }
     QString dimensionsText() const;
     QString spacingText() const;
     QString sourcePath() const { return m_sourcePath; }
@@ -83,6 +110,8 @@ public:
     QString errorMessage() const { return m_errorMessage; }
     double windowWidth() const { return m_windowWidth; }
     double windowLevel() const { return m_windowLevel; }
+    double displayWindowLevel() const;
+    bool projectionUnsigned() const { return m_projectionUnsigned; }
     int datasetRevision() const { return m_datasetRevision; }
     int segmentationRevision() const { return m_segmentationRevision; }
     bool regionGrowingSeedValid() const { return m_regionGrowingSeedValid; }
@@ -92,13 +121,21 @@ public:
     int regionGrowingSeedValue() const { return m_regionGrowingSeedValue; }
     QVariantList seriesChoices() const { return m_seriesChoices; }
     int selectedSeriesIndex() const { return m_selectedSeriesIndex; }
+    QVariantList volumeNodes() const;
+    int selectedVolumeIndex() const { return m_selectedVolumeIndex; }
+    bool activeVolumeVisible() const;
 
     std::shared_ptr<const VolumeSnapshot> volumeSnapshot() const;
+    std::shared_ptr<const VolumeSnapshot> projectionPairSnapshot() const;
     std::shared_ptr<const MaskSnapshot> maskSnapshot() const;
 
     Q_INVOKABLE bool importDicom(const QUrl &source);
     Q_INVOKABLE void importDicomAsync(const QUrl &source);
     Q_INVOKABLE bool selectSeries(int index);
+    Q_INVOKABLE bool selectVolume(int index);
+    Q_INVOKABLE bool renameVolume(int index, const QString &name);
+    Q_INVOKABLE bool removeVolume(int index);
+    Q_INVOKABLE bool setVolumeVisibility(int index, bool visible);
     Q_INVOKABLE bool exportDicomCopy(const QUrl &destination);
     Q_INVOKABLE void loadDemoVolume();
     Q_INVOKABLE bool applyThreshold(double lower, double upper);
@@ -109,7 +146,8 @@ public:
                                        double lower, double upper);
     Q_INVOKABLE void clearSegmentation();
     Q_INVOKABLE double estimateDistanceMm(int viewType, double pixelDx, double pixelDy,
-                                          double viewportWidth, double viewportHeight) const;
+                                          double viewportWidth, double viewportHeight,
+                                          bool pairedProjection = false) const;
 
 public slots:
     void setWindowWidth(double value);
@@ -124,24 +162,33 @@ signals:
     void busyChanged();
     void seriesChoicesChanged();
     void selectedSeriesIndexChanged();
+    void volumeNodesChanged();
 
 private:
     void setBusy(bool busy);
     void setError(const QString &message);
     void installVolume(std::shared_ptr<VolumeSnapshot> snapshot,
-                       const QStringList &sourceFiles);
+                       const QStringList &sourceFiles,
+                       std::shared_ptr<VolumeSnapshot> pairSnapshot = {},
+                       const QStringList &pairSourceFiles = {});
     void resetMetadata();
     void publishSeriesCandidates(
         std::vector<std::shared_ptr<DicomSeriesCandidate>> candidates);
     bool loadSeriesCandidate(int index);
+    void activateVolumeNode(int index);
+    void updateActiveVolumeNode();
+    void clearActiveVolume();
 
     mutable std::mutex m_snapshotMutex;
     std::shared_ptr<VolumeSnapshot> m_volume;
+    std::shared_ptr<VolumeSnapshot> m_projectionPair;
     std::shared_ptr<MaskSnapshot> m_mask;
     QStringList m_sourceFiles;
     std::vector<std::shared_ptr<DicomSeriesCandidate>> m_seriesCandidates;
     QVariantList m_seriesChoices;
     int m_selectedSeriesIndex = -1;
+    std::vector<std::shared_ptr<LoadedVolumeNode>> m_volumeNodes;
+    int m_selectedVolumeIndex = -1;
 
     QString m_patientName;
     QString m_patientId;
@@ -151,6 +198,15 @@ private:
     QString m_studyDescription;
     QString m_studyDate;
     QString m_seriesDescription;
+    QString m_projectionViewLabel;
+    QString m_projectionPairViewLabel;
+    QString m_patientOrientation;
+    QString m_projectionPairOrientation;
+    QString m_imageType;
+    QString m_sopClassName;
+    QString m_projectionPairImageType;
+    QString m_projectionPairSopClassName;
+    bool m_projectionUnsigned = false;
     QString m_sourcePath;
     QString m_statusMessage;
     QString m_errorMessage;

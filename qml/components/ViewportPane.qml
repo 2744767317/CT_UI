@@ -9,11 +9,20 @@ Rectangle {
     property string title: "AXIAL"
     property color viewColor: Theme.axial
     property string toolMode: "浏览"
+    property int toolModeIndex: 0
     property bool mip: false
     property int volumePreset: MedicalViewport.BonePreset
     property bool showSegmentation: true
+    property bool pairedProjection: false
+    property bool showImage: true
+    property bool showMeasurements: true
+    property real segmentationOpacity: 0.72
+    property int rotationQuarterTurns: 0
+    property bool flipHorizontal: false
+    property bool flipVertical: false
     property bool seedPicking: false
     property bool seedMarkerVisible: false
+    property bool activeViewport: false
     property real seedMarkerX: 0.5
     property real seedMarkerY: 0.5
     property real cropMinimum: 0.0
@@ -22,11 +31,15 @@ Rectangle {
     property point measureStart: Qt.point(-1, -1)
     property point measureEnd: Qt.point(-1, -1)
     property real measuredDistance: 0.0
+    property point windowStart: Qt.point(0, 0)
+    property real windowStartWidth: 400.0
+    property real windowStartLevel: 40.0
     signal seedSelected(int viewType, real normalizedX, real normalizedY, real slicePosition)
+    signal activated()
 
     color: Theme.image
     border.width: 1
-    border.color: activeArea.containsMouse ? root.viewColor : Theme.border
+    border.color: root.activeViewport || activeArea.containsMouse ? root.viewColor : Theme.border
     clip: true
 
     MedicalViewport {
@@ -38,7 +51,13 @@ Rectangle {
         slicePosition: root.slicePosition
         mip: root.mip
         volumePreset: root.volumePreset
+        pairedProjection: root.pairedProjection
+        showImage: root.showImage
         showSegmentation: root.showSegmentation
+        segmentationOpacity: root.segmentationOpacity
+        rotationQuarterTurns: root.rotationQuarterTurns
+        flipHorizontal: root.flipHorizontal
+        flipVertical: root.flipVertical
         cropMinimum: root.cropMinimum
         cropMaximum: root.cropMaximum
         onVoxelPicked: (voxelX, voxelY, voxelZ, hu, normalizedX, normalizedY) => {
@@ -70,6 +89,29 @@ Rectangle {
         }
     }
 
+    Rectangle {
+        visible: root.activeViewport
+        anchors.fill: parent
+        anchors.margins: 3
+        color: "transparent"
+        border.width: 2
+        border.color: root.viewColor
+        z: 6
+    }
+
+    MouseArea {
+        anchors.fill: parent
+        z: 7
+        enabled: medicalData.projectionData && !root.seedPicking
+                 && root.toolModeIndex !== 1 && root.toolModeIndex !== 4
+        acceptedButtons: Qt.LeftButton
+        propagateComposedEvents: true
+        onPressed: mouse => {
+            root.activated()
+            mouse.accepted = false
+        }
+    }
+
     Text {
         anchors.right: parent.right
         anchors.top: parent.top
@@ -77,7 +119,7 @@ Rectangle {
         text: medicalData.loaded
               ? (root.viewType === MedicalViewport.Volume3D
                  ? (root.mip ? "MIP" : "VOLUME")
-                 : "WW " + Math.round(medicalData.windowWidth) + "  WL " + Math.round(medicalData.windowLevel))
+                 : "WW " + Math.round(medicalData.windowWidth) + "  WL " + Math.round(medicalData.displayWindowLevel))
               : "NO DATA"
         color: Theme.textSecondary
         font.pixelSize: 12
@@ -100,12 +142,20 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: true
         enabled: root.viewType !== MedicalViewport.Volume3D
-                 && (root.seedPicking || root.toolMode === "测量")
+                 && (root.seedPicking || root.toolModeIndex === 1 || root.toolModeIndex === 4)
         preventStealing: true
-        cursorShape: root.seedPicking ? Qt.CrossCursor : Qt.ArrowCursor
+        cursorShape: root.seedPicking || root.toolModeIndex === 4
+                     ? Qt.CrossCursor : Qt.SizeAllCursor
         onPressed: mouse => {
+            root.activated()
             if (root.seedPicking) {
                 viewport.pickVoxel(mouse.x, mouse.y)
+                return
+            }
+            if (root.toolModeIndex === 1) {
+                root.windowStart = Qt.point(mouse.x, mouse.y)
+                root.windowStartWidth = medicalData.windowWidth
+                root.windowStartLevel = medicalData.windowLevel
                 return
             }
             root.measureStart = Qt.point(mouse.x, mouse.y)
@@ -114,12 +164,21 @@ Rectangle {
         }
         onPositionChanged: mouse => {
             if (pressed) {
+                if (root.toolModeIndex === 1) {
+                    const dx = mouse.x - root.windowStart.x
+                    const dy = mouse.y - root.windowStart.y
+                    medicalData.windowWidth = Math.max(
+                        1, root.windowStartWidth * Math.exp(dx / Math.max(1, width) * 2.0))
+                    medicalData.windowLevel = root.windowStartLevel
+                        - dy / Math.max(1, height) * root.windowStartWidth * 2.0
+                    return
+                }
                 root.measureEnd = Qt.point(mouse.x, mouse.y)
                 root.measuredDistance = medicalData.estimateDistanceMm(
                     root.viewType,
                     root.measureEnd.x - root.measureStart.x,
                     root.measureEnd.y - root.measureStart.y,
-                    width, height)
+                    width, height, root.pairedProjection)
                 measureCanvas.requestPaint()
             }
         }
@@ -183,7 +242,7 @@ Rectangle {
     Canvas {
         id: measureCanvas
         anchors.fill: parent
-        visible: root.measureStart.x >= 0 && root.measureEnd.x >= 0
+        visible: root.showMeasurements && root.measureStart.x >= 0 && root.measureEnd.x >= 0
         onPaint: {
             const ctx = getContext("2d")
             ctx.reset()
@@ -222,7 +281,7 @@ Rectangle {
 
     Slider {
         id: sliceSlider
-        visible: root.viewType !== MedicalViewport.Volume3D && medicalData.loaded
+        visible: medicalData.volumeData && root.viewType !== MedicalViewport.Volume3D
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
