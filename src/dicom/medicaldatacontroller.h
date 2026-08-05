@@ -10,6 +10,7 @@
 #include <mutex>
 #include <vector>
 
+// 跨 GUI/VTK 渲染线程传递的不可变体数据快照。方向矩阵采用 DICOM LPS 坐标系。
 struct VolumeSnapshot
 {
     std::array<int, 3> dimensions {0, 0, 0};
@@ -19,6 +20,7 @@ struct VolumeSnapshot
     std::vector<short> pixels;
 };
 
+// 分割结果与源 Volume 保持相同几何信息，像素值 0/1 表示背景和前景。
 struct MaskSnapshot
 {
     std::array<int, 3> dimensions {0, 0, 0};
@@ -31,6 +33,8 @@ struct MaskSnapshot
 struct DicomSeriesCandidate;
 struct LoadedVolumeNode;
 
+// 医学数据与场景控制器：负责 DICOM 发现、Volume 节点、显示状态和 ITK 算法。
+// QML 不直接持有大块像素内存，只通过属性和只读快照访问当前激活节点。
 class MedicalDataController final : public QObject
 {
     Q_OBJECT
@@ -187,6 +191,7 @@ private:
     std::vector<std::shared_ptr<DicomSeriesCandidate>> m_seriesCandidates;
     QVariantList m_seriesChoices;
     int m_selectedSeriesIndex = -1;
+    // 工作区可同时驻留多个 Volume；渲染层每次消费 selectedVolume 对应的快照。
     std::vector<std::shared_ptr<LoadedVolumeNode>> m_volumeNodes;
     int m_selectedVolumeIndex = -1;
 

@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 
 project(CT_UI VERSION 0.3 LANGUAGES CXX)
 
+# 项目级 CMake 只负责总装；依赖发现、编译选项、输出目录和源码清单分别放在
+# cmake/ 下，测试目标放在 tests/ 下，避免根文件持续膨胀。
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerOptions)
 include(MedicalDependencies)
@@ -35,6 +37,8 @@ find_package(Qt6 6.10 REQUIRED COMPONENTS
     Test
 )
 
+# 该函数根据 CT_ENABLE_MEDICAL_BACKEND 决定是否加载 VTK/ITK/RTK。
+# 外部 SDK 始终从安装目录引用，不会复制到源码仓库。
 ct_configure_medical_dependencies()
 
 set(CT_UI_CPP_SOURCES ${CT_UI_COMMON_SOURCES})
@@ -48,7 +52,7 @@ endif()
 qt_standard_project_setup(REQUIRES 6.10)
 
 qt_add_executable(CT_UI WIN32
-    main.cpp
+    src/main.cpp
     ${CT_UI_CPP_SOURCES}
 )
 ct_set_output_directories(CT_UI bin)
@@ -90,42 +94,7 @@ endif()
 option(CT_UI_BUILD_TESTS "Build CT_UI automated tests" ON)
 if(CT_UI_BUILD_TESTS)
     enable_testing()
-    qt_add_executable(CT_UI_core_tests
-        tests/core_tests.cpp
-        src/application/workflowcontroller.cpp
-        src/application/workflowcontroller.h
-        $<$<BOOL:${CT_ENABLE_MEDICAL_BACKEND}>:src/dicom/medicaldatacontroller.cpp>
-        $<$<NOT:$<BOOL:${CT_ENABLE_MEDICAL_BACKEND}>>:src/dicom/medicaldatacontroller_stub.cpp>
-        src/dicom/medicaldatacontroller.h
-    )
-    ct_set_output_directories(CT_UI_core_tests tests)
-    target_include_directories(CT_UI_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    ct_apply_compiler_options(CT_UI_core_tests)
-    target_compile_definitions(CT_UI_core_tests PRIVATE
-        CT_ENABLE_MEDICAL_BACKEND=$<BOOL:${CT_ENABLE_MEDICAL_BACKEND}>
-    )
-    target_link_libraries(CT_UI_core_tests PRIVATE
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Concurrent
-        Qt6::Test
-    )
-    if(CT_ENABLE_MEDICAL_BACKEND)
-        target_link_libraries(CT_UI_core_tests PRIVATE ${ITK_LIBRARIES})
-    endif()
-    ct_copy_medical_runtime_dlls(CT_UI_core_tests)
-    add_test(NAME core_tests COMMAND CT_UI_core_tests)
-    if(MINGW)
-        set_tests_properties(core_tests PROPERTIES
-            ENVIRONMENT_MODIFICATION
-                "PATH=path_list_prepend:${Qt6_DIR}/../../../bin"
-        )
-    elseif(MSVC AND CT_ENABLE_MEDICAL_BACKEND)
-        set_tests_properties(core_tests PROPERTIES
-            ENVIRONMENT_MODIFICATION
-                "PATH=path_list_prepend:${VTK_DIR}/../../../bin;PATH=path_list_prepend:${ITK_DIR}/../../../bin;PATH=path_list_prepend:${Qt6_DIR}/../../../bin"
-        )
-    endif()
+    add_subdirectory(tests)
 endif()
 
 install(TARGETS CT_UI

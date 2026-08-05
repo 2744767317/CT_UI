@@ -2,6 +2,7 @@ include_guard(GLOBAL)
 
 set(_ct_backend_default ON)
 if(MINGW)
+    # 当前医学 SDK 是 MSVC ABI，MinGW 默认只编译 UI 兼容层。
     set(_ct_backend_default OFF)
 endif()
 
@@ -29,6 +30,8 @@ macro(ct_configure_medical_dependencies)
                 "supported, but CUDA 12.8 and RTK GPU reconstruction require v143.")
         endif()
 
+        # 路径优先级：CMake 缓存中的显式 VTK_DIR/ITK_DIR > 同名环境变量 >
+        # CT_MEDICAL_SDK_ROOT 派生目录。三方库始终位于仓库外部。
         set(_ct_default_sdk_root "$ENV{CT_MEDICAL_SDK_ROOT}")
         if(NOT _ct_default_sdk_root)
             set(_ct_default_sdk_root "E:/A/GuangSuo")
@@ -105,8 +108,8 @@ macro(ct_configure_medical_dependencies)
             GUISupportQtQuick
         )
 
-        # The local ITK package enumerates all compiled modules before applying
-        # COMPONENTS. Avoid loading unrelated modules that contain stale paths.
+        # 本机 ITK 配置会先枚举全部已编译模块，再处理 COMPONENTS。提前标记当前
+        # 阶段不用的模块，避免其历史绝对路径污染配置过程。
         set(ITKVtkGlue_LOADED 1)
         set(TotalVariation_LOADED 1)
         set(_ct_itk_components
@@ -119,8 +122,7 @@ macro(ct_configure_medical_dependencies)
             find_package(CUDAToolkit 12.8 REQUIRED)
             list(APPEND _ct_itk_components RTK)
         else()
-            # RTK is installed, but the current image-workstation phase does
-            # not link reconstruction code or CUDA kernels.
+            # RTK 虽已安装，但影像工作站阶段尚未调用重建和 CUDA 内核。
             set(RTK_LOADED 1)
         endif()
         find_package(ITK 5.4 CONFIG REQUIRED COMPONENTS ${_ct_itk_components})

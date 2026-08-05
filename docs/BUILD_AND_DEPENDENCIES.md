@@ -1,102 +1,239 @@
-# 构建目录与医学三方库
+# 构建、目录与医学三方库
 
-## 目录职责
+本文说明当前 Windows 开发环境中的 CMake 配置、三方库引用关系、构建产物位置和常见问题。架构职责见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-```text
-CT_UI/
-  cmake/          CMake 模块：依赖发现、编译选项、输出和源码清单
-  docs/           构建与依赖说明
-  qml/            当前 QML 界面
-  src/            当前 C++ 业务、DICOM 和 VTK 渲染代码
-  tests/          当前自动化测试
+## 1. 源码与构建目录
 
-CT_UI-build/      CMake 缓存、目标文件、生成代码、DLL 和 EXE
-```
-
-`CT_UI-build` 与源码目录同级，不提交到 Git。删除它不会丢失源码，重新运行 CMake 即可生成。
-
-## 当前机器的引用方式
-
-项目没有把 Qt、VTK、ITK 或 RTK 复制进仓库。推荐预设使用以下外部绝对路径：
+项目使用 out-of-source build，源码和生成物必须分开：
 
 ```text
-Qt SDK root       F:/Qt/6.10.3/msvc2022_64
-Medical SDK root  E:/A/GuangSuo
-VTK install       E:/A/GuangSuo/VTK_INSTALL/install_debug
-ITK/RTK install   E:/A/GuangSuo/ITK_INSTALL/install_debug
-CUDA              C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8
+E:/A/CT_UI/                 Git 仓库，只存源码、QML、文档和测试代码
+E:/A/CT_UI-build/
+  msvc-v143-debug/          MSVC CMake 缓存和构建产物
+  mingw-ui-debug/           MinGW UI 兼容构建产物
 ```
 
-依赖发现集中在 `cmake/MedicalDependencies.cmake`。推荐预设只设置一个医学库根目录：
+构建目录可以随时删除并由 CMake 重新生成。不要把以下内容移动回源码仓库：
+
+```text
+CMakeCache.txt  CMakeFiles/  artifacts/  Testing/
+*.obj  *.lib  *.dll  *.exe  *_autogen/  .qtc/package-manager/
+```
+
+`.qtcreator/`、`.qtc_clangd/` 和 `CMakeUserPresets.json` 是本机 IDE 配置，也不提交 Git。测试源码位于 `tests/`，本地 DICOM 数据位于仓库外，并通过环境变量提供给测试。
+
+## 2. CMake 文件职责
+
+| 文件 | 职责 |
+| --- | --- |
+| `CMakeLists.txt` | Qt 查找、主程序装配、医学/兼容实现选择、测试子目录 |
+| `CMakePresets.json` | 固定生成器、工具集、Qt 路径、SDK 根目录和输出目录 |
+| `cmake/CompilerOptions.cmake` | 警告级别、UTF-8、统一产物目录 |
+| `cmake/MedicalDependencies.cmake` | VTK/ITK/RTK/CUDA 的查找、校验和组件选择 |
+| `cmake/RuntimeDeployment.cmake` | 复制目标实际依赖的医学运行时 DLL |
+| `cmake/SourceFiles.cmake` | C++ 医学实现、兼容实现和 QML 文件清单 |
+| `tests/CMakeLists.txt` | 测试目标、链接库、CTest 运行环境 |
+
+根 `CMakeLists.txt` 保持为装配层。增加源码时先判断所属层，再修改 `SourceFiles.cmake`；增加测试目标时修改 `tests/CMakeLists.txt`；增加三方库时修改 `MedicalDependencies.cmake`。
+
+## 3. 当前开发环境
+
+```text
+Qt MSVC          F:/Qt/6.10.3/msvc2022_64
+Qt MinGW         F:/Qt/6.10.3/mingw_64
+Visual Studio    F:/Vsiual Stdio
+Medical SDK root E:/A/GuangSuo
+VTK install      E:/A/GuangSuo/VTK_INSTALL/install_debug
+ITK/RTK install  E:/A/GuangSuo/ITK_INSTALL/install_debug
+CUDA             C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8
+```
+
+三方库不在仓库内。`CMakePresets.json` 中的路径是这台开发机的绝对路径，用于让 Qt Creator 和命令行得到一致结果。换机器时应复制并修改不入库的 `CMakeUserPresets.json`，或在首次配置时传入新的缓存变量；不要改业务代码。
+
+## 4. 依赖发现顺序
+
+推荐预设设置：
 
 ```cmake
 CT_MEDICAL_SDK_ROOT=E:/A/GuangSuo
 ```
 
-CMake 随后查找：
+由此派生：
 
 ```text
-VTK_DIR = <root>/VTK_INSTALL/install_debug/lib/cmake/vtk-9.5
-ITK_DIR = <root>/ITK_INSTALL/install_debug/lib/cmake/ITK-5.4
+CT_VTK_INSTALL_DIR = <root>/VTK_INSTALL/install_debug
+CT_ITK_INSTALL_DIR = <root>/ITK_INSTALL/install_debug
+VTK_DIR             = <VTK install>/lib/cmake/vtk-9.5
+ITK_DIR             = <ITK install>/lib/cmake/ITK-5.4
 ```
 
-查找优先级是：显式 `VTK_DIR`/`ITK_DIR`、同名环境变量、`CT_MEDICAL_SDK_ROOT` 派生路径。路径只用于配置和链接，不会把整个 SDK 复制到源码目录。
+`VTK_DIR` 和 `ITK_DIR` 的查找优先级：
 
-## 三个医学库的实际状态
+1. CMake 缓存中显式传入的 `VTK_DIR`/`ITK_DIR`；
+2. 同名环境变量；
+3. `CT_MEDICAL_SDK_ROOT` 派生目录；
+4. 未设置根目录时，当前开发机的默认值 `E:/A/GuangSuo`。
+
+项目没有在 `target_link_libraries()` 中逐个硬编码 `.lib` 的绝对路径。`find_package(... CONFIG)` 读取安装目录内的 `vtk-config.cmake` 和 `ITKConfig.cmake`，由它们提供 include 路径、导入目标、Debug 库位置和传递依赖。
+
+## 5. 实际链接关系
+
+### Qt 6.10.3
+
+主程序使用 `Core`、`Gui`、`Qml`、`Quick`、`QuickControls2` 和 `Concurrent`。测试额外使用 `Test`。Qt 由 `CMAKE_PREFIX_PATH` 和 `Qt6_DIR` 定位。
 
 ### VTK 9.5
 
-`find_package(VTK 9.5 CONFIG REQUIRED COMPONENTS ...)` 导入 VTK 的 CMake Targets。当前程序使用 `QQuickVTKItem`、二维切片、MPR、体绘制、MIP 和分割表面，因此链接 VTK QtQuick、Imaging、Rendering 和 Filters 模块。
+当前组件覆盖 `QQuickVTKItem`、MPR、图像映射、GPU 体绘制、MIP 和分割表面：
+
+```text
+CommonCore  CommonDataModel
+FiltersCore  FiltersGeneral  FiltersGeometry
+ImagingCore  ImagingColor
+InteractionStyle
+RenderingCore  RenderingOpenGL2  RenderingVolumeOpenGL2
+GUISupportQtQuick
+```
+
+`vtk_module_autoinit()` 为已链接渲染模块生成正确的初始化代码。
 
 ### ITK 5.4.5
 
-`find_package(ITK 5.4 CONFIG REQUIRED COMPONENTS ...)` 当前加载：
-
 ```text
-ITKCommon
-ITKIOGDCM
-ITKThresholding
-ITKRegionGrowing
+ITKCommon          基础图像和数据结构
+ITKIOGDCM          DICOM/GDCM 读取
+ITKThresholding    二值阈值分割
+ITKRegionGrowing   Connected Threshold 种子生长
 ```
 
-它们分别支持基础图像对象、DICOM/GDCM 读取、阈值分割和种子生长。
+### RTK 2.5 与 CUDA 12.8
 
-### RTK 2.5
+RTK 已安装在 ITK 目录中，但当前工作站没有调用投影重建管线，因此默认：
 
-本机 ITK 安装中确实存在：
-
-```text
-lib/itkRTK-5.4.lib
-bin/itkRTK-5.4.dll
-lib/cmake/ITK-5.4/Modules/RTK.cmake
+```cmake
+CT_ENABLE_RTK_BACKEND=OFF
 ```
 
-但当前阶段没有 RTK 重建调用，默认 `CT_ENABLE_RTK_BACKEND=OFF`，所以 RTK 和 CUDA 不会被强制链接。将来开始投影重建时，使用 MSVC v143 并显式设置：
+此时 RTK 和 CUDA 不参与查找、编译或运行时部署。将来实现投影重建后，使用 MSVC v143 并启用：
 
-```text
-CT_ENABLE_RTK_BACKEND=ON
+```powershell
+cmake --preset msvc-v143-debug --fresh -DCT_ENABLE_RTK_BACKEND=ON
 ```
 
-此时 CMake 才会把 `RTK` 加入 ITK Components，并要求 CUDA 12.8。
+启用后 CMake 才执行 `find_package(CUDAToolkit 12.8 REQUIRED)`，并把 `RTK` 加入 ITK Components。只有打开开关并不代表已实现重建 UI 或算法调用。
 
-## 编译和运行时文件
+## 6. 主要 CMake 选项
 
-CMake 使用 `.lib` 完成链接。构建结束后，`cmake/RuntimeDeployment.cmake` 根据目标的真实依赖，只把已链接的 VTK/ITK/RTK DLL 复制到可执行文件目录。Qt DLL 和 `platforms` 插件由 Qt Creator Kit 管理；制作独立安装包时使用同版本 `windeployqt`。
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CT_ENABLE_MEDICAL_BACKEND` | MSVC `ON`，MinGW `OFF` | 启用真实 DICOM、ITK 和 VTK 实现 |
+| `CT_ENABLE_RTK_BACKEND` | `OFF` | 查找并链接 RTK/CUDA，为未来重建功能预留 |
+| `CT_UI_BUILD_TESTS` | `ON` | 构建并注册 `CT_UI_core_tests` |
+| `CT_MEDICAL_SDK_ROOT` | `E:/A/GuangSuo` | VTK/ITK 安装目录的共同父目录 |
+| `CT_VTK_INSTALL_DIR` | 根目录派生 | 覆盖 VTK 安装前缀 |
+| `CT_ITK_INSTALL_DIR` | 根目录派生 | 覆盖 ITK/RTK 安装前缀 |
+| `VTK_DIR` | 自动定位 | 直接指定 VTK Config Package 目录 |
+| `ITK_DIR` | 自动定位 | 直接指定 ITK Config Package 目录 |
 
-推荐 MSVC 输出：
+现有医学 SDK 只有 Debug 配置。使用医学后端时必须构建 Debug；要增加 Release，需要先用匹配的 MSVC 工具集构建 VTK、ITK、RTK Release 安装树，再增加对应 preset，不能把 Debug/Release 库混链。
+
+## 7. MSVC 构建
+
+推荐命令：
+
+```powershell
+cmake --preset msvc-v143-debug --fresh
+cmake --build --preset msvc-v143-debug --parallel 4
+ctest --preset msvc-v143-debug --output-on-failure
+```
+
+`Visual Studio 18 2026` 是多配置生成器，构建和测试 preset 都显式选择 `Debug`。`--fresh` 会忽略旧 CMake 缓存，适合项目改名、移动或依赖路径变化后使用。
+
+Qt Creator 操作：
+
+1. 打开 `E:/A/CT_UI/CMakeLists.txt`。
+2. 选择 `CT UI - MSVC v143 Debug (Recommended)` preset。
+3. 检查生成器为 Visual Studio 2026、架构为 x64、工具集为 v143。
+4. 检查构建目录为 `E:/A/CT_UI-build/msvc-v143-debug`。
+5. 构建并运行 `CT_UI`。
+
+Qt Creator 自动创建的 Kit 可能使用 v145。当前 VTK/ITK 工作站可在已验证的 Kit 中使用，但 CUDA 12.8/RTK 开发仍以 preset 固定的 v143 为基线。
+
+## 8. MinGW UI 兼容构建
+
+```powershell
+cmake --preset mingw-ui-debug --fresh
+cmake --build --preset mingw-ui-debug --parallel 4
+ctest --preset mingw-ui-debug --output-on-failure
+```
+
+MinGW 构建选择 `medicaldatacontroller_stub.cpp` 和 `medicalviewportitem_stub.cpp`，保持 QML API 可编译和界面可运行，但不提供真实 DICOM、ITK、VTK 功能。MSVC `.lib` 与 MinGW ABI 不兼容，不能通过修改后缀或手工添加库目录解决。
+
+## 9. DLL 部署
+
+Windows 链接阶段使用 `.lib`，运行阶段需要对应 `.dll`。`ct_copy_medical_runtime_dlls()` 使用 CMake 的 `TARGET_RUNTIME_DLLS` 读取目标真实依赖，只复制已链接的 VTK/ITK/RTK DLL 到目标目录：
 
 ```text
-E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/CT_UI.exe
+E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/
+```
+
+Qt Creator 运行时会设置 Qt 环境。制作独立目录时，使用同版本：
+
+```powershell
+F:/Qt/6.10.3/msvc2022_64/bin/windeployqt.exe `
+  E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/CT_UI.exe
+```
+
+不要只复制几个 `Qt6*.dll`，Qt Quick 还需要 QML 模块和 `platforms/qwindows.dll` 等插件。
+
+## 10. 测试
+
+测试目标在 `tests/CMakeLists.txt` 中独立声明，输出到：
+
+```text
 E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/tests/CT_UI_core_tests.exe
 ```
 
-## Qt Creator 正确打开方式
+默认测试包括工作流守卫、演示 Volume、阈值分割、Volume 节点生命周期和种子生长校验。真实数据测试在未配置数据路径时自动跳过：
 
-1. 打开 `E:/A/CT_UI/CMakeLists.txt`。
-2. 在初始配置中选择 `CT UI - MSVC v143 Debug (Recommended)` Preset。
-3. 确认构建目录为 `E:/A/CT_UI-build/msvc-v143-debug`。
-4. 构建目标 `CT_UI`，再运行。
+```powershell
+$env:CT_UI_TEST_DICOM_DIR = "E:/path/to/one/dicom/series"
+$env:CT_UI_TEST_LIDC_ROOT = "E:/A/LIDC-IDRI-0001"
+$env:CT_UI_TEST_XRAY_ROOT = "E:/A/X_TEST"
+ctest --preset msvc-v143-debug --output-on-failure
+```
 
-如果工程移动过位置并出现 `CMakeCache.txt directory is different`，不要编辑缓存内容。删除旧构建目录，或在 Qt Creator 执行“构建 > 清除 CMake 配置”，然后重新配置。
+CTest 不继承 Qt Creator 的运行环境，因此 `tests/CMakeLists.txt` 为测试进程补充 Qt 和医学 DLL 的 `PATH`。这只影响测试进程，不修改系统环境变量。
 
-MinGW 预设只用于 QML/UI 兼容性验证。现有 VTK、ITK、RTK 是 MSVC ABI，不能直接由 MinGW 链接。
+## 11. 常见问题
+
+### CMakeCache 指向旧项目目录
+
+症状：项目改名后提示 source directory 不一致。使用 `--fresh` 重新配置，或删除仓库外对应构建目录。不要移动旧缓存到新目录。
+
+### 找不到 VTK/ITK Config
+
+先检查以下文件真实存在：
+
+```text
+E:/A/GuangSuo/VTK_INSTALL/install_debug/lib/cmake/vtk-9.5/vtk-config.cmake
+E:/A/GuangSuo/ITK_INSTALL/install_debug/lib/cmake/ITK-5.4/ITKConfig.cmake
+```
+
+若 SDK 移动，传入新的 `CT_MEDICAL_SDK_ROOT`；只有目录布局不一致时才分别设置 `VTK_DIR` 和 `ITK_DIR`。
+
+### 找不到 DLL 或程序启动即退出
+
+先从 Qt Creator 运行，以区分 Qt 部署问题和医学 DLL 问题。再检查 `artifacts/Debug/bin` 是否包含实际链接的 VTK/ITK DLL；独立运行前执行 `windeployqt`。
+
+### Debug/Release 不匹配
+
+当前安装树含 `VTK-targets-debug.cmake` 和 `ITKTargets-debug.cmake`。不要用 Release 程序链接 Debug 医学库。需要 Release 时重新构建完整 Release SDK。
+
+### LNK4099 提示缺少 ITK/VNL PDB
+
+现有 ITK Debug 安装包的部分静态库没有同时安装 PDB，链接器会提示 `LNK4099`。这不会影响程序生成和运行，只表示调试器无法进入对应三方库内部查看符号。需要消除该提示时，应在构建 ITK 时生成并安装匹配 PDB，而不是在本项目中全局关闭链接警告。
+
+### MinGW 无法链接医学库
+
+这是 ABI 不兼容，不是 `link_directories()` 缺失。使用 MSVC preset，或用 MinGW 从源码重新编译 Qt 匹配的 VTK/ITK/RTK。

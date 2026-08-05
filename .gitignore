@@ -4,6 +4,8 @@ build-*/
 cmake-build-*/
 out/
 dist/
+artifacts/
+_deps/
 
 # Compiled executables
 *.exe
@@ -42,6 +44,8 @@ Makefile
 *.cmake.in
 compile_commands.json
 Testing/
+CTestTestfile.cmake
+install_manifest.txt
 
 # Visual Studio / MSVC
 .vs/

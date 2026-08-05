@@ -36,7 +36,6 @@
       "binaryDir": "${sourceDir}/../CT_UI-build/mingw-ui-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "F:/Qt/Tools/mingw1310_64/bin/gcc.exe",
         "CMAKE_CXX_COMPILER": "F:/Qt/Tools/mingw1310_64/bin/g++.exe",
         "CMAKE_MAKE_PROGRAM": "F:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe",
         "CMAKE_PREFIX_PATH": "F:/Qt/6.10.3/mingw_64",

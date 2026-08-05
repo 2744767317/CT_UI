@@ -10,6 +10,8 @@
 int main(int argc, char *argv[])
 {
 #if CT_ENABLE_MEDICAL_BACKEND
+    // QQuickVTKItem 必须在 QGuiApplication 创建前选定图形 API，避免 Qt Quick 与 VTK
+    // 分别创建不兼容的渲染后端。
     QQuickVTKItem::setGraphicsApi();
 #endif
     QQuickStyle::setStyle(QStringLiteral("Basic"));
@@ -22,6 +24,8 @@ int main(int argc, char *argv[])
 
     WorkflowController workflow;
     MedicalDataController medicalData;
+
+    // 命令行入口用于自动化冒烟测试和开发调试，不参与正式患者工作流。
     const QStringList arguments = QCoreApplication::arguments();
     if (arguments.contains(QStringLiteral("--demo")))
         medicalData.loadDemoVolume();
@@ -50,6 +54,7 @@ int main(int argc, char *argv[])
         workflow.advance();
     }
     QQmlApplicationEngine engine;
+    // QML 只持有控制器引用；DICOM 像素、ITK 处理和 VTK 管线均由 C++ 层管理。
     engine.rootContext()->setContextProperty(QStringLiteral("workflowController"), &workflow);
     engine.rootContext()->setContextProperty(QStringLiteral("medicalData"), &medicalData);
     engine.rootContext()->setContextProperty(

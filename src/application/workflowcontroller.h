@@ -2,6 +2,7 @@
 
 #include <QObject>
 
+// 四页任务流的唯一状态源。QML 只能访问已经完成或当前步骤，锁定后禁止跳转。
 class WorkflowController final : public QObject
 {
     Q_OBJECT

@@ -37,6 +37,7 @@
 
 namespace {
 
+// 该对象随 QQuickVTKItem 的渲染上下文创建和销毁，成员只能在 VTK 渲染线程访问。
 class ViewportPipeline final : public vtkObject
 {
 public:
@@ -199,6 +200,8 @@ void applyVolumePreset(ViewportPipeline *pipeline,
     property->SetSpecular(0.12);
     property->SetSpecularPower(10.0);
 
+    // 将预设的归一化颜色/不透明度控制点映射到当前窗宽窗位，使二维窗位工具
+    // 能像 Slicer 一样实时改变三维可见的组织密度范围。
     const double width = std::max(1.0, windowWidth);
     const double low = windowLevel - width * 0.5;
     const double high = windowLevel + width * 0.5;
@@ -748,6 +751,7 @@ void MedicalViewportItem::reloadData()
         ? (m_pairedProjection ? m_controller->projectionPairOrientation()
                               : m_controller->patientOrientation())
         : QString();
+    // Lambda 只捕获不可变快照和值类型，避免渲染线程读取 GUI 对象的可变成员。
     dispatch_async([volume, mask, type, slice, mipMode, preset, projectionData,
                     showImage, segmentation, segmentationOpacity,
                     rotationQuarterTurns, flipHorizontal, flipVertical,

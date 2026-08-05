@@ -29,6 +29,7 @@
 #include <Windows.h>
 #endif
 
+// 目录扫描阶段只读取轻量标签并建立候选对象，直到用户选择后才解码完整像素。
 struct DicomSeriesCandidate
 {
     struct Instance
@@ -68,6 +69,8 @@ struct DicomSeriesCandidate
     bool volume = false;
 };
 
+// 工作区节点保存像素快照、显示参数和元数据。切换节点时不重新读取 DICOM，
+// 分割掩膜与窗宽窗位也随节点一起恢复。
 struct LoadedVolumeNode
 {
     QString id;
@@ -235,6 +238,8 @@ DicomScanResult scanDicomDirectory(const QString &path)
             candidateFiles.append(path);
         }
 
+        // CT 按 Series Instance UID 聚合为体数据；DX/CR 等投影按 SOP Instance
+        // 分开，防止把正位和侧位错误堆叠成三维 Volume。
         QHash<QString, std::shared_ptr<DicomSeriesCandidate>> groupedSeries;
         for (const QString &filePath : candidateFiles) {
             const QFileInfo fileInfo(filePath);
@@ -800,6 +805,7 @@ void MedicalDataController::importDicomAsync(const QUrl &source)
     m_errorMessage.clear();
     emit statusChanged();
 
+    // 递归探测可能遍历数千文件，放到线程池执行；候选结果只在 GUI 线程发布。
     auto *watcher = new QFutureWatcher<DicomScanResult>(this);
     connect(watcher, &QFutureWatcher<DicomScanResult>::finished, this,
             [this, watcher] {
@@ -1274,6 +1280,8 @@ void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapsh
                                           std::shared_ptr<VolumeSnapshot> pairSnapshot,
                                           const QStringList &pairSourceFiles)
 {
+    // 相同源文件再次载入时更新原节点，保留用户重命名和显隐状态；不同源文件
+    // 则追加为新 Volume，实现同一工作区内的多数据集切换。
     auto node = std::make_shared<LoadedVolumeNode>();
     node->id = !m_sourcePath.isEmpty()
         ? m_sourcePath
@@ -1342,6 +1350,7 @@ void MedicalDataController::activateVolumeNode(int index)
     if (index < 0 || index >= static_cast<int>(m_volumeNodes.size()))
         return;
     const auto &node = m_volumeNodes[static_cast<std::size_t>(index)];
+    // shared_ptr 交换是轻量操作；dataChanged 后各视口异步重建自己的 VTK 管线。
     {
         std::lock_guard<std::mutex> guard(m_snapshotMutex);
         m_volume = node->volume;

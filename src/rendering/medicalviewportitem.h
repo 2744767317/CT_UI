@@ -10,6 +10,7 @@ using MedicalViewportBase = QQuickVTKItem;
 using MedicalViewportBase = QQuickPaintedItem;
 #endif
 
+// QML 与 VTK 的边界控件。GUI 线程只更新属性，所有 VTK 对象都在渲染线程中访问。
 class MedicalViewportItem : public MedicalViewportBase
 {
     Q_OBJECT
