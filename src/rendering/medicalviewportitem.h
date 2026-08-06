@@ -1,6 +1,9 @@
 #pragma once
 
+#include "src/annotation/annotationcontroller.h"
 #include "src/dicom/medicaldatacontroller.h"
+
+#include <QVariantMap>
 
 #if CT_ENABLE_MEDICAL_BACKEND
 #include <QQuickVTKItem.h>
@@ -16,6 +19,7 @@ class MedicalViewportItem : public MedicalViewportBase
     Q_OBJECT
     Q_PROPERTY(ViewType viewType READ viewType WRITE setViewType NOTIFY viewTypeChanged)
     Q_PROPERTY(MedicalDataController *controller READ controller WRITE setController NOTIFY controllerChanged)
+    Q_PROPERTY(AnnotationController *annotations READ annotations WRITE setAnnotations NOTIFY annotationsChanged)
     Q_PROPERTY(double slicePosition READ slicePosition WRITE setSlicePosition NOTIFY slicePositionChanged)
     Q_PROPERTY(bool mip READ mip WRITE setMip NOTIFY mipChanged)
     Q_PROPERTY(VolumePreset volumePreset READ volumePreset WRITE setVolumePreset NOTIFY volumePresetChanged)
@@ -28,6 +32,7 @@ class MedicalViewportItem : public MedicalViewportBase
     Q_PROPERTY(bool flipVertical READ flipVertical WRITE setFlipVertical NOTIFY orientationChanged)
     Q_PROPERTY(double cropMinimum READ cropMinimum WRITE setCropMinimum NOTIFY cropChanged)
     Q_PROPERTY(double cropMaximum READ cropMaximum WRITE setCropMaximum NOTIFY cropChanged)
+    Q_PROPERTY(bool showAnnotations READ showAnnotations WRITE setShowAnnotations NOTIFY showAnnotationsChanged)
 
 public:
     enum class ViewType { Axial = 0, Coronal = 1, Sagittal = 2, Volume3D = 3 };
@@ -44,6 +49,7 @@ public:
 
     ViewType viewType() const { return m_viewType; }
     MedicalDataController *controller() const { return m_controller; }
+    AnnotationController *annotations() const { return m_annotations; }
     double slicePosition() const { return m_slicePosition; }
     bool mip() const { return m_mip; }
     VolumePreset volumePreset() const { return m_volumePreset; }
@@ -56,9 +62,11 @@ public:
     bool flipVertical() const { return m_flipVertical; }
     double cropMinimum() const { return m_cropMinimum; }
     double cropMaximum() const { return m_cropMaximum; }
+    bool showAnnotations() const { return m_showAnnotations; }
 
     void setViewType(ViewType type);
     void setController(MedicalDataController *controller);
+    void setAnnotations(AnnotationController *annotations);
     void setSlicePosition(double position);
     void setMip(bool mip);
     void setVolumePreset(VolumePreset preset);
@@ -71,11 +79,18 @@ public:
     void setFlipVertical(bool flipped);
     void setCropMinimum(double value);
     void setCropMaximum(double value);
-    Q_INVOKABLE void pickVoxel(double itemX, double itemY);
+    void setShowAnnotations(bool visible);
+    Q_INVOKABLE void pickVoxel(double itemX, double itemY, bool updateSeed = true);
+    /// 按当前切片几何关系同步映射点击到体素（不依赖 VTK PropPicker）。
+    Q_INVOKABLE bool mapClickToVoxel(double itemX, double itemY, bool updateSeed = false);
+    /// 命中已提交标记的控制点；未命中返回空 map。
+    Q_INVOKABLE QVariantMap hitTestControlPoint(double itemX, double itemY,
+                                                double tolerancePx = 14.0);
 
 signals:
     void viewTypeChanged();
     void controllerChanged();
+    void annotationsChanged();
     void slicePositionChanged();
     void mipChanged();
     void volumePresetChanged();
@@ -85,6 +100,7 @@ signals:
     void segmentationOpacityChanged();
     void orientationChanged();
     void cropChanged();
+    void showAnnotationsChanged();
     void voxelPicked(int voxelX, int voxelY, int voxelZ, int hu,
                      double normalizedX, double normalizedY);
     void voxelPickFailed(const QString &message);
@@ -92,6 +108,7 @@ signals:
 private slots:
     void reloadData();
     void updateRenderState();
+    void syncAnnotationActors();
 
 #if CT_ENABLE_MEDICAL_BACKEND
 protected:
@@ -104,6 +121,7 @@ public:
 private:
     ViewType m_viewType = ViewType::Axial;
     MedicalDataController *m_controller = nullptr;
+    AnnotationController *m_annotations = nullptr;
     std::shared_ptr<const VolumeSnapshot> m_volume;
     std::shared_ptr<const MaskSnapshot> m_mask;
     double m_slicePosition = 0.5;
@@ -114,6 +132,7 @@ private:
     bool m_showSegmentation = true;
     bool m_pairedProjection = false;
     bool m_showImage = true;
+    bool m_showAnnotations = true;
     double m_segmentationOpacity = 0.72;
     int m_rotationQuarterTurns = 0;
     bool m_flipHorizontal = false;

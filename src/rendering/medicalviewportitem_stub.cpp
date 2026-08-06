@@ -38,6 +38,30 @@ void MedicalViewportItem::setController(MedicalDataController *controller)
     reloadData();
 }
 
+void MedicalViewportItem::setAnnotations(AnnotationController *annotations)
+{
+    if (m_annotations == annotations)
+        return;
+    if (m_annotations)
+        disconnect(m_annotations, nullptr, this, nullptr);
+    m_annotations = annotations;
+    emit annotationsChanged();
+    update();
+}
+
+void MedicalViewportItem::setShowAnnotations(bool visible)
+{
+    if (m_showAnnotations == visible)
+        return;
+    m_showAnnotations = visible;
+    emit showAnnotationsChanged();
+    update();
+}
+
+void MedicalViewportItem::syncAnnotationActors()
+{
+}
+
 void MedicalViewportItem::setSlicePosition(double position)
 {
     position = std::clamp(position, 0.0, 1.0);
@@ -145,9 +169,20 @@ void MedicalViewportItem::setCropMaximum(double value)
     update();
 }
 
-void MedicalViewportItem::pickVoxel(double, double)
+bool MedicalViewportItem::mapClickToVoxel(double, double, bool)
 {
     emit voxelPickFailed(QStringLiteral("MinGW UI 兼容模式不提供医学图像拾取。"));
+    return false;
+}
+
+QVariantMap MedicalViewportItem::hitTestControlPoint(double, double, double)
+{
+    return {};
+}
+
+void MedicalViewportItem::pickVoxel(double itemX, double itemY, bool updateSeed)
+{
+    mapClickToVoxel(itemX, itemY, updateSeed);
 }
 
 void MedicalViewportItem::reloadData()

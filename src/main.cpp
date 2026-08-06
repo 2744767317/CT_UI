@@ -1,3 +1,4 @@
+#include "src/annotation/annotationcontroller.h"
 #include "src/application/workflowcontroller.h"
 #include "src/dicom/medicaldatacontroller.h"
 #include "src/rendering/medicalviewportitem.h"
@@ -21,9 +22,14 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationVersion(QStringLiteral("0.3.0"));
 
     qmlRegisterType<MedicalViewportItem>("GuangSuo.CT.Rendering", 1, 0, "MedicalViewport");
+    qmlRegisterUncreatableType<AnnotationController>(
+        "GuangSuo.CT", 1, 0, "AnnotationTool",
+        QStringLiteral("Access via annotationController context property"));
 
     WorkflowController workflow;
     MedicalDataController medicalData;
+    AnnotationController annotationController;
+    annotationController.setMedicalData(&medicalData);
 
     // 命令行入口用于自动化冒烟测试和开发调试，不参与正式患者工作流。
     const QStringList arguments = QCoreApplication::arguments();
@@ -57,6 +63,8 @@ int main(int argc, char *argv[])
     // QML 只持有控制器引用；DICOM 像素、ITK 处理和 VTK 管线均由 C++ 层管理。
     engine.rootContext()->setContextProperty(QStringLiteral("workflowController"), &workflow);
     engine.rootContext()->setContextProperty(QStringLiteral("medicalData"), &medicalData);
+    engine.rootContext()->setContextProperty(QStringLiteral("annotationController"),
+                                             &annotationController);
     engine.rootContext()->setContextProperty(
         QStringLiteral("medicalBackendEnabled"),
         QVariant::fromValue(static_cast<bool>(CT_ENABLE_MEDICAL_BACKEND)));

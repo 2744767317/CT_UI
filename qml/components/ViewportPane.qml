@@ -10,6 +10,7 @@ Rectangle {
     property color viewColor: Theme.axial
     property string toolMode: "浏览"
     property int toolModeIndex: 0
+    property int measureSubMode: 0
     property bool mip: false
     property int volumePreset: MedicalViewport.BonePreset
     property bool showSegmentation: true
@@ -28,19 +29,31 @@ Rectangle {
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
     property real slicePosition: sliceSlider.value
-    property point measureStart: Qt.point(-1, -1)
-    property point measureEnd: Qt.point(-1, -1)
-    property real measuredDistance: 0.0
-    property point windowStart: Qt.point(0, 0)
-    property real windowStartWidth: 400.0
-    property real windowStartLevel: 40.0
+    property bool annotationPicking: false
+    property bool draggingHandle: false
+    property int dragNodeId: -1
+    property int dragPointIndex: -1
     signal seedSelected(int viewType, real normalizedX, real normalizedY, real slicePosition)
     signal activated()
+
+    readonly property bool measureMode: root.toolModeIndex === 4
+            && root.viewType !== MedicalViewport.Volume3D
+            && medicalData.volumeData
+    // 与窗宽窗位对称：用 toolModeIndex 直接打开 MouseArea，避免 measureMode 复合条件导致测量时 enabled=false
+    readonly property bool captureInput: root.seedPicking
+            || root.toolModeIndex === 1
+            || root.toolModeIndex === 4
 
     color: Theme.image
     border.width: 1
     border.color: root.activeViewport || activeArea.containsMouse ? root.viewColor : Theme.border
     clip: true
+
+    onShowMeasurementsChanged: viewport.showAnnotations = root.showMeasurements
+    Component.onCompleted: {
+        viewport.annotations = annotationController
+        viewport.showAnnotations = root.showMeasurements
+    }
 
     MedicalViewport {
         id: viewport
@@ -60,10 +73,23 @@ Rectangle {
         flipVertical: root.flipVertical
         cropMinimum: root.cropMinimum
         cropMaximum: root.cropMaximum
+        showAnnotations: root.showMeasurements
         onVoxelPicked: (voxelX, voxelY, voxelZ, hu, normalizedX, normalizedY) => {
+            if (root.draggingHandle && root.dragNodeId >= 0) {
+                annotationController.updateControlPointFromVoxel(
+                            root.dragNodeId, root.dragPointIndex, voxelX, voxelY, voxelZ)
+                return
+            }
+            if (root.annotationPicking) {
+                root.annotationPicking = false
+                annotationController.addControlPoint(voxelX, voxelY, voxelZ)
+                return
+            }
             root.seedSelected(root.viewType, normalizedX, normalizedY, root.slicePosition)
         }
         onVoxelPickFailed: message => {
+            root.annotationPicking = false
+            root.draggingHandle = false
             pickError.text = message
             pickError.visible = true
             pickErrorTimer.restart()
@@ -103,7 +129,7 @@ Rectangle {
         anchors.fill: parent
         z: 7
         enabled: medicalData.projectionData && !root.seedPicking
-                 && root.toolModeIndex !== 1 && root.toolModeIndex !== 4
+                 && root.toolModeIndex !== 1 && !root.measureMode
         acceptedButtons: Qt.LeftButton
         propagateComposedEvents: true
         onPressed: mouse => {
@@ -140,16 +166,26 @@ Rectangle {
     MouseArea {
         id: activeArea
         anchors.fill: parent
+        z: 10
         hoverEnabled: true
-        enabled: root.viewType !== MedicalViewport.Volume3D
-                 && (root.seedPicking || root.toolModeIndex === 1 || root.toolModeIndex === 4)
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        enabled: root.viewType !== MedicalViewport.Volume3D && root.captureInput
         preventStealing: true
         cursorShape: root.seedPicking || root.toolModeIndex === 4
                      ? Qt.CrossCursor : Qt.SizeAllCursor
+
         onPressed: mouse => {
             root.activated()
+            if (mouse.button === Qt.RightButton) {
+                if (root.toolModeIndex === 4
+                        && annotationController.toolType === AnnotationTool.PerimeterTool) {
+                    annotationController.finishActive()
+                }
+                return
+            }
             if (root.seedPicking) {
-                viewport.pickVoxel(mouse.x, mouse.y)
+                const seedLocal = mapToItem(viewport, mouse.x, mouse.y)
+                viewport.mapClickToVoxel(seedLocal.x, seedLocal.y, true)
                 return
             }
             if (root.toolModeIndex === 1) {
@@ -158,31 +194,56 @@ Rectangle {
                 root.windowStartLevel = medicalData.windowLevel
                 return
             }
-            root.measureStart = Qt.point(mouse.x, mouse.y)
-            root.measureEnd = root.measureStart
-            measureCanvas.requestPaint()
+            if (root.toolModeIndex === 4) {
+                const local = mapToItem(viewport, mouse.x, mouse.y)
+                if (!annotationController.hasActive) {
+                    const hit = viewport.hitTestControlPoint(local.x, local.y, 14)
+                    if (hit && hit.nodeId !== undefined) {
+                        root.draggingHandle = true
+                        root.dragNodeId = hit.nodeId
+                        root.dragPointIndex = hit.pointIndex
+                        return
+                    }
+                }
+                root.annotationPicking = true
+                if (!viewport.mapClickToVoxel(local.x, local.y, false))
+                    root.annotationPicking = false
+            }
         }
         onPositionChanged: mouse => {
-            if (pressed) {
-                if (root.toolModeIndex === 1) {
-                    const dx = mouse.x - root.windowStart.x
-                    const dy = mouse.y - root.windowStart.y
-                    medicalData.windowWidth = Math.max(
-                        1, root.windowStartWidth * Math.exp(dx / Math.max(1, width) * 2.0))
-                    medicalData.windowLevel = root.windowStartLevel
-                        - dy / Math.max(1, height) * root.windowStartWidth * 2.0
-                    return
-                }
-                root.measureEnd = Qt.point(mouse.x, mouse.y)
-                root.measuredDistance = medicalData.estimateDistanceMm(
-                    root.viewType,
-                    root.measureEnd.x - root.measureStart.x,
-                    root.measureEnd.y - root.measureStart.y,
-                    width, height, root.pairedProjection)
-                measureCanvas.requestPaint()
+            if (root.toolModeIndex === 1 && pressed) {
+                const dx = mouse.x - root.windowStart.x
+                const dy = mouse.y - root.windowStart.y
+                medicalData.windowWidth = Math.max(
+                    1, root.windowStartWidth * Math.exp(dx / Math.max(1, width) * 2.0))
+                medicalData.windowLevel = root.windowStartLevel
+                    - dy / Math.max(1, height) * root.windowStartWidth * 2.0
+                return
+            }
+            if (root.draggingHandle && pressed) {
+                const local = mapToItem(viewport, mouse.x, mouse.y)
+                viewport.mapClickToVoxel(local.x, local.y, false)
+            }
+        }
+        onReleased: {
+            if (root.draggingHandle) {
+                root.draggingHandle = false
+                root.dragNodeId = -1
+                root.dragPointIndex = -1
+            }
+        }
+        onDoubleClicked: mouse => {
+            if (root.toolModeIndex === 4
+                    && annotationController.toolType === AnnotationTool.PerimeterTool) {
+                annotationController.finishActive()
+                mouse.accepted = true
             }
         }
     }
+
+    property point windowStart: Qt.point(0, 0)
+    property real windowStartWidth: 400.0
+    property real windowStartLevel: 40.0
 
     Item {
         visible: root.seedMarkerVisible && medicalData.regionGrowingSeedValid
@@ -224,7 +285,7 @@ Rectangle {
         radius: Theme.radius
         color: "#E61A1F22"
         border.color: Theme.danger
-        z: 7
+        z: 20
         property alias text: pickErrorText.text
         Text {
             id: pickErrorText
@@ -239,44 +300,17 @@ Rectangle {
         onTriggered: pickError.visible = false
     }
 
-    Canvas {
-        id: measureCanvas
-        anchors.fill: parent
-        visible: root.showMeasurements && root.measureStart.x >= 0 && root.measureEnd.x >= 0
-        onPaint: {
-            const ctx = getContext("2d")
-            ctx.reset()
-            ctx.strokeStyle = Theme.accent
-            ctx.fillStyle = Theme.accent
-            ctx.lineWidth = 2
-            ctx.beginPath()
-            ctx.moveTo(root.measureStart.x, root.measureStart.y)
-            ctx.lineTo(root.measureEnd.x, root.measureEnd.y)
-            ctx.stroke()
-            ctx.beginPath()
-            ctx.arc(root.measureStart.x, root.measureStart.y, 4, 0, Math.PI * 2)
-            ctx.arc(root.measureEnd.x, root.measureEnd.y, 4, 0, Math.PI * 2)
-            ctx.fill()
-        }
-    }
-
-    Rectangle {
-        visible: measureCanvas.visible
+    Text {
+        visible: root.toolModeIndex === 4
+                 && root.viewType !== MedicalViewport.Volume3D
+                 && annotationController.toolType === AnnotationTool.PerimeterTool
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: sliceSlider.visible ? sliceSlider.top : parent.bottom
         anchors.bottomMargin: 10
-        height: 28
-        width: measurementLabel.implicitWidth + 20
-        radius: 3
-        color: "#D91A1F22"
-        border.color: Theme.accent
-        Text {
-            id: measurementLabel
-            anchors.centerIn: parent
-            text: root.measuredDistance.toFixed(1) + " mm"
-            color: Theme.text
-            font.pixelSize: 13
-        }
+        z: 11
+        text: "单击加点 · 双击/右键闭合 · Esc 取消 · 拖拽控制点编辑"
+        color: Theme.textSecondary
+        font.pixelSize: 12
     }
 
     Slider {

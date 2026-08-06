@@ -4,6 +4,16 @@ include_guard(GLOBAL)
 set(CT_UI_COMMON_SOURCES
     src/application/workflowcontroller.cpp
     src/application/workflowcontroller.h
+    src/annotation/annotationcontroller.cpp
+    src/annotation/annotationcontroller.h
+    src/markups/markupsmetrics.cpp
+    src/markups/markupsmetrics.h
+    src/markups/markupsnode.cpp
+    src/markups/markupsnode.h
+    src/markups/markupspicker.cpp
+    src/markups/markupspicker.h
+    src/markups/markupsscene.cpp
+    src/markups/markupsscene.h
     src/dicom/medicaldatacontroller.h
     src/rendering/medicalviewportitem.h
 )

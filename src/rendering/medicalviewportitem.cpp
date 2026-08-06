@@ -1,8 +1,14 @@
 #include "medicalviewportitem.h"
 
+#include "src/markups/markupspicker.h"
+
 #include <vtkActor.h>
+#include <vtkActor2D.h>
+#include <vtkBillboardTextActor3D.h>
 #include <vtkCamera.h>
+#include <vtkCellArray.h>
 #include <vtkColorTransferFunction.h>
+#include <vtkCoordinate.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
@@ -11,29 +17,40 @@
 #include <vtkImageSliceMapper.h>
 #include <vtkInteractorStyleImage.h>
 #include <vtkInteractorStyleTrackballCamera.h>
+#include <vtkLineSource.h>
 #include <vtkLookupTable.h>
 #include <vtkLight.h>
+#include <vtkMath.h>
 #include <vtkMatrix4x4.h>
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
 #include <vtkPiecewiseFunction.h>
+#include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
-#include <vtkPropPicker.h>
+#include <vtkPolyDataMapper2D.h>
 #include <vtkProperty.h>
+#include <vtkProperty2D.h>
+#include <vtkPropPicker.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
+#include <vtkSphereSource.h>
+#include <vtkTextActor.h>
+#include <vtkTextProperty.h>
+#include <vtkTubeFilter.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #include <QMetaObject>
 #include <QPointer>
 #include <QStringList>
+#include <QVariantMap>
 
 namespace {
 
@@ -62,6 +79,7 @@ public:
     vtkSmartPointer<vtkVolumeProperty> volumeProperty;
     vtkSmartPointer<vtkVolume> volumeActor;
     vtkSmartPointer<vtkActor> segmentationActor;
+    std::vector<vtkSmartPointer<vtkProp>> annotationProps;
 };
 
 vtkStandardNewMacro(ViewportPipeline);
@@ -288,8 +306,7 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
 {
     const int orientation = orientationFor(type);
     const int sliceCount = pipeline->image->GetDimensions()[orientation];
-    const int slice = std::clamp(static_cast<int>(slicePosition * (sliceCount - 1)),
-                                 0, std::max(0, sliceCount - 1));
+    const int slice = MarkupsPicker::sliceIndexFromPosition(slicePosition, sliceCount);
 
     pipeline->sliceMapper = vtkSmartPointer<vtkImageSliceMapper>::New();
     pipeline->sliceMapper->SetInputData(pipeline->image);
@@ -409,13 +426,18 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
     pipeline->volumeProperty = nullptr;
     pipeline->volumeActor = nullptr;
     pipeline->segmentationActor = nullptr;
+    pipeline->annotationProps.clear();
 
     if (!volume || volume->pixels.empty())
         return;
 
     pipeline->image = vtkImageFromVolume(*volume);
     updatePatientTransform(pipeline, *volume);
-    pipeline->renderTransform = displayTransformFor(*volume, projectionData,
+    // 显示翻转/旋转只作用于切片视图；3D 必须保持真实 LPS 世界坐标，
+    // 否则 vtkVolume(GPU 路径) 与标注 vtkActor 对翻转矩阵应用不一致而错位。
+    const bool applyDisplayTransform = projectionData
+        && type != MedicalViewportItem::ViewType::Volume3D;
+    pipeline->renderTransform = displayTransformFor(*volume, applyDisplayTransform,
                                                      patientOrientation,
                                                      rotationQuarterTurns,
                                                      flipHorizontal, flipVertical);
@@ -543,6 +565,32 @@ void MedicalViewportItem::setController(MedicalDataController *controller)
     reloadData();
 }
 
+void MedicalViewportItem::setAnnotations(AnnotationController *annotations)
+{
+    if (m_annotations == annotations)
+        return;
+    if (m_annotations)
+        disconnect(m_annotations, nullptr, this, nullptr);
+    m_annotations = annotations;
+    if (m_annotations) {
+        connect(m_annotations, &AnnotationController::annotationsChanged,
+                this, &MedicalViewportItem::syncAnnotationActors);
+        connect(m_annotations, &AnnotationController::visibleChanged,
+                this, &MedicalViewportItem::syncAnnotationActors);
+    }
+    emit annotationsChanged();
+    syncAnnotationActors();
+}
+
+void MedicalViewportItem::setShowAnnotations(bool visible)
+{
+    if (m_showAnnotations == visible)
+        return;
+    m_showAnnotations = visible;
+    emit showAnnotationsChanged();
+    syncAnnotationActors();
+}
+
 void MedicalViewportItem::setSlicePosition(double position)
 {
     position = std::clamp(position, 0.0, 1.0);
@@ -551,6 +599,7 @@ void MedicalViewportItem::setSlicePosition(double position)
     m_slicePosition = position;
     emit slicePositionChanged();
     updateRenderState();
+    syncAnnotationActors();
 }
 
 void MedicalViewportItem::setMip(bool mip)
@@ -656,70 +705,318 @@ void MedicalViewportItem::setCropMaximum(double value)
     reloadData();
 }
 
-void MedicalViewportItem::pickVoxel(double itemX, double itemY)
+bool MedicalViewportItem::mapClickToVoxel(double itemX, double itemY, bool updateSeed)
 {
     if (m_viewType == ViewType::Volume3D || !m_controller || !m_volume
-        || width() <= 0.0 || height() <= 0.0)
-        return;
+        || width() <= 0.0 || height() <= 0.0) {
+        emit voxelPickFailed(QStringLiteral("当前视图无法拾取体素。"));
+        return false;
+    }
 
-    const double itemWidth = width();
-    const double itemHeight = height();
-    const double normalizedX = std::clamp(itemX / itemWidth, 0.0, 1.0);
-    const double normalizedY = std::clamp(itemY / itemHeight, 0.0, 1.0);
-    const auto view = QPointer<MedicalViewportItem>(this);
-    const auto controller = QPointer<MedicalDataController>(m_controller);
+    QVector3D world;
+    int voxel[3] = {0, 0, 0};
+    if (!MarkupsPicker::mapClickToWorld(*m_volume, static_cast<int>(m_viewType), m_slicePosition,
+                                        itemX, itemY, width(), height(), &world, voxel)) {
+        emit voxelPickFailed(QStringLiteral("点击位置不在当前切片图像内。"));
+        return false;
+    }
 
-    dispatch_async([view, controller, normalizedX, normalizedY]
-                   (vtkRenderWindow *window, vtkUserData userData) {
+    int hu = 0;
+    const auto &dims = m_volume->dimensions;
+    const auto &pixels = m_volume->pixels;
+    const std::size_t flat = static_cast<std::size_t>(voxel[0])
+        + static_cast<std::size_t>(voxel[1]) * static_cast<std::size_t>(dims[0])
+        + static_cast<std::size_t>(voxel[2]) * static_cast<std::size_t>(dims[0])
+              * static_cast<std::size_t>(dims[1]);
+    if (flat < pixels.size())
+        hu = pixels[flat];
+
+    if (updateSeed && !m_controller->setRegionGrowingSeed(voxel[0], voxel[1], voxel[2])) {
+        emit voxelPickFailed(QStringLiteral("无法设置种子点。"));
+        return false;
+    }
+
+    const double normalizedX = std::clamp(itemX / width(), 0.0, 1.0);
+    const double normalizedY = std::clamp(itemY / height(), 0.0, 1.0);
+    const int value = updateSeed ? m_controller->regionGrowingSeedValue() : hu;
+    emit voxelPicked(voxel[0], voxel[1], voxel[2], value, normalizedX, normalizedY);
+    return true;
+}
+
+void MedicalViewportItem::pickVoxel(double itemX, double itemY, bool updateSeed)
+{
+    mapClickToVoxel(itemX, itemY, updateSeed);
+}
+
+QVariantMap MedicalViewportItem::hitTestControlPoint(double itemX, double itemY,
+                                                     double tolerancePx)
+{
+    QVariantMap result;
+    if (m_viewType == ViewType::Volume3D || !m_volume || !m_annotations
+        || !m_annotations->visible() || !m_showAnnotations)
+        return result;
+
+    const QVariantList items = m_annotations->items();
+    double bestDist2 = tolerancePx * tolerancePx;
+    int bestNodeId = -1;
+    int bestPointIndex = -1;
+
+    for (const QVariant &entry : items) {
+        const QVariantMap item = entry.toMap();
+        if (!item.value(QStringLiteral("visible"), true).toBool())
+            continue;
+        const int nodeId = item.value(QStringLiteral("id")).toInt();
+        const QVariantList points = item.value(QStringLiteral("points")).toList();
+        for (int pointIndex = 0; pointIndex < points.size(); ++pointIndex) {
+            const QVariantMap point = points.at(pointIndex).toMap();
+            const QVector3D world(point.value(QStringLiteral("x")).toFloat(),
+                                 point.value(QStringLiteral("y")).toFloat(),
+                                 point.value(QStringLiteral("z")).toFloat());
+            if (std::abs(MarkupsPicker::sliceDelta(*m_volume, static_cast<int>(m_viewType),
+                                                   m_slicePosition, world)) > 0)
+                continue;
+            double dx = 0.0;
+            double dy = 0.0;
+            if (!MarkupsPicker::worldToDisplay(*m_volume, static_cast<int>(m_viewType),
+                                               m_slicePosition, width(), height(),
+                                               world, &dx, &dy))
+                continue;
+            const double dist2 = (dx - itemX) * (dx - itemX) + (dy - itemY) * (dy - itemY);
+            if (dist2 <= bestDist2) {
+                bestDist2 = dist2;
+                bestNodeId = nodeId;
+                bestPointIndex = pointIndex;
+            }
+        }
+    }
+
+    if (bestNodeId < 0)
+        return result;
+    result.insert(QStringLiteral("nodeId"), bestNodeId);
+    result.insert(QStringLiteral("pointIndex"), bestPointIndex);
+    return result;
+}
+
+void MedicalViewportItem::syncAnnotationActors()
+{
+    const QVariantList items = (m_annotations && m_showAnnotations)
+        ? m_annotations->renderItems()
+        : QVariantList {};
+    const auto volume = m_volume;
+    const bool show = m_showAnnotations && m_annotations && m_annotations->visible();
+    const int viewType = static_cast<int>(m_viewType);
+    const double slicePosition = m_slicePosition;
+    const bool is3d = m_viewType == ViewType::Volume3D;
+
+    dispatch_async([items, volume, show, viewType, slicePosition, is3d](
+                       vtkRenderWindow *, vtkUserData userData) {
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
-        if (!pipeline || !pipeline->renderer || !pipeline->sliceActor
-            || !pipeline->image || !pipeline->worldToRenderData || !view || !controller)
+        if (!pipeline || !pipeline->renderer)
             return;
 
-        const int *renderSize = window->GetSize();
-        const double displayX = normalizedX * std::max(0, renderSize[0] - 1);
-        const double displayY = (1.0 - normalizedY) * std::max(0, renderSize[1] - 1);
-        vtkNew<vtkPropPicker> picker;
-        picker->PickFromListOn();
-        picker->AddPickList(pipeline->sliceActor);
-        if (!picker->Pick(displayX, displayY, 0.0, pipeline->renderer)) {
-            QMetaObject::invokeMethod(view.data(), [view]() {
-                if (view)
-                    emit view->voxelPickFailed(QStringLiteral("点击位置不在当前切片图像内。"));
-            }, Qt::QueuedConnection);
+        for (const auto &prop : pipeline->annotationProps)
+            pipeline->renderer->RemoveViewProp(prop);
+        pipeline->annotationProps.clear();
+
+        if (!show || !volume || items.isEmpty() || !pipeline->renderTransform)
             return;
+
+        constexpr double kRedR = 0.898;
+        constexpr double kRedG = 0.224;
+        constexpr double kRedB = 0.208;
+        const double spacingMax = std::max({volume->spacing[0], volume->spacing[1],
+                                            volume->spacing[2]});
+        const double radius = spacingMax * (is3d ? 4.5 : 3.6);
+        const double liftOffset = spacingMax * 0.6;
+
+        auto toRenderPoint = [&](const QVector3D &world) -> std::array<double, 3> {
+            if (is3d)
+                return {static_cast<double>(world.x()), static_cast<double>(world.y()),
+                        static_cast<double>(world.z())};
+            auto p = MarkupsPicker::worldToImagePhysical(*volume, world);
+            const double in[4] = {p[0], p[1], p[2], 1.0};
+            double out[4] = {0.0, 0.0, 0.0, 1.0};
+            pipeline->renderTransform->MultiplyPoint(in, out);
+            const double w = (out[3] != 0.0) ? out[3] : 1.0;
+            std::array<double, 3> r {out[0] / w, out[1] / w, out[2] / w};
+            // 抬升必须在渲染(世界)空间沿“朝相机”方向，与体数据 direction 无关。
+            // 若像旧代码那样在图像坐标系按固定轴抬升，当切片轴方向为负
+            // (direction 对角元为 -1，如倒序存储的 DICOM) 时，抬升会背对相机，
+            // 把细线和平面标签压到切片背面而被图像挡住。
+            // 相机方向见 rebuildPipeline：轴向 +Z、冠状 -Y、矢状 +X。
+            if (viewType == 1)      r[1] -= liftOffset;   // Coronal：相机在 -Y
+            else if (viewType == 2) r[0] += liftOffset;   // Sagittal：相机在 +X
+            else                    r[2] += liftOffset;   // Axial：相机在 +Z
+            return r;
+        };
+
+        auto styleActor = [&](vtkActor *actor, double opacity) {
+            auto *prop = actor->GetProperty();
+            prop->SetColor(kRedR, kRedG, kRedB);
+            prop->SetOpacity(opacity);
+            prop->SetLighting(false);
+            prop->SetAmbient(1.0);
+            prop->SetDiffuse(0.0);
+            prop->SetSpecular(0.0);
+            actor->SetForceOpaque(opacity >= 0.9);
+        };
+
+        auto addSphere = [&](const std::array<double, 3> &p, double opacity) {
+            vtkNew<vtkSphereSource> sphere;
+            sphere->SetCenter(p[0], p[1], p[2]);
+            sphere->SetRadius(radius);
+            sphere->SetThetaResolution(20);
+            sphere->SetPhiResolution(20);
+            sphere->Update();
+            vtkNew<vtkPolyDataMapper> mapper;
+            mapper->SetInputData(sphere->GetOutput());
+            mapper->ScalarVisibilityOff();
+            auto actor = vtkSmartPointer<vtkActor>::New();
+            actor->SetMapper(mapper);
+            styleActor(actor, opacity);
+            pipeline->renderer->AddActor(actor);
+            pipeline->annotationProps.push_back(actor);
+        };
+
+        // 线段用 vtkLineSource + vtkPolyDataMapper（不经 TubeFilter），
+        // SetLineWidth 为屏幕像素宽度（OpenGL glLineWidth），不随缩放变化，
+        // 永远可见；避免世界半径 tube 在正常缩放下降到亚像素而消失。
+        auto addLine = [&](const std::array<double, 3> &a,
+                           const std::array<double, 3> &b, double opacity) {
+            vtkNew<vtkLineSource> line;
+            line->SetPoint1(a[0], a[1], a[2]);
+            line->SetPoint2(b[0], b[1], b[2]);
+            line->Update();
+            vtkNew<vtkPolyDataMapper> mapper;
+            mapper->SetInputData(line->GetOutput());
+            mapper->ScalarVisibilityOff();
+            auto actor = vtkSmartPointer<vtkActor>::New();
+            actor->SetMapper(mapper);
+            styleActor(actor, opacity);
+            actor->GetProperty()->SetLineWidth(2.0);
+            pipeline->renderer->AddActor(actor);
+            pipeline->annotationProps.push_back(actor);
+        };
+
+        // 标签锚点用点的精确世界坐标，偏移改用显示像素，文字像素对齐，
+        // 缩放时只在屏幕平移、不重合不跑偏。
+        auto addLabel = [&](const std::array<double, 3> &p, const QString &text,
+                            double opacity) {
+            if (opacity < 0.40 || text.isEmpty())
+                return;
+            auto label = vtkSmartPointer<vtkBillboardTextActor3D>::New();
+            label->SetInput(text.toUtf8().constData());
+            label->SetPosition(p[0], p[1], p[2]);
+            label->SetDisplayOffset(12, 12);
+            label->SetForceOpaque(true);
+            auto *tp = label->GetTextProperty();
+            tp->SetFontSize(is3d ? 16 : 15);
+            tp->SetColor(kRedR, kRedG, kRedB);
+            tp->SetBold(true);
+            tp->SetOpacity(std::max(0.85, opacity));
+            tp->SetShadow(true);
+            tp->SetBackgroundOpacity(0.35);
+            tp->SetBackgroundColor(0.02, 0.03, 0.04);
+            pipeline->renderer->AddViewProp(label);
+            pipeline->annotationProps.push_back(label);
+        };
+
+        auto opacityForWorld = [&](const QVector3D &world) -> double {
+            if (is3d)
+                return 1.0;
+            const int delta = std::abs(MarkupsPicker::sliceDelta(*volume, viewType,
+                                                                 slicePosition, world));
+            if (delta == 0)
+                return 1.0;
+            if (delta == 1)
+                return 0.40;
+            if (delta == 2)
+                return 0.20;
+            return 0.0;
+        };
+
+        for (const QVariant &entry : items) {
+            const QVariantMap item = entry.toMap();
+            if (!item.value(QStringLiteral("visible"), true).toBool())
+                continue;
+            const QVariantList points = item.value(QStringLiteral("points")).toList();
+            if (points.isEmpty())
+                continue;
+            const int type = item.value(QStringLiteral("type")).toInt();
+            const QString displayText = item.value(QStringLiteral("displayText")).toString();
+            const QString labelText = item.value(QStringLiteral("label")).toString();
+
+            std::vector<std::array<double, 3>> render;
+            std::vector<double> opacities;
+            render.reserve(static_cast<std::size_t>(points.size()));
+            opacities.reserve(static_cast<std::size_t>(points.size()));
+
+            for (const QVariant &pointEntry : points) {
+                const QVariantMap point = pointEntry.toMap();
+                const QVector3D world(point.value(QStringLiteral("x")).toFloat(),
+                                     point.value(QStringLiteral("y")).toFloat(),
+                                     point.value(QStringLiteral("z")).toFloat());
+                const double opacity = opacityForWorld(world);
+                render.push_back(toRenderPoint(world));
+                opacities.push_back(opacity);
+                if (opacity > 0.0)
+                    addSphere(render.back(), opacity);
+            }
+
+            auto segOpacity = [&](std::size_t a, std::size_t b) {
+                return std::min(opacities[a], opacities[b]);
+            };
+
+            if (type == 0 && !render.empty()) {
+                addLabel(render[0],
+                         displayText.isEmpty() ? labelText : displayText, opacities[0]);
+            } else if (type == 1 && render.size() >= 2) {
+                const double opacity = segOpacity(0, 1);
+                if (opacity > 0.0) {
+                    addLine(render[0], render[1], opacity);
+                    const std::array<double, 3> mid = {
+                        (render[0][0] + render[1][0]) * 0.5,
+                        (render[0][1] + render[1][1]) * 0.5,
+                        (render[0][2] + render[1][2]) * 0.5};
+                    addLabel(mid, displayText, opacity);
+                }
+            } else if (type == 2 && render.size() >= 2) {
+                if (const double o01 = segOpacity(0, 1); o01 > 0.0)
+                    addLine(render[0], render[1], o01);
+                if (render.size() >= 3) {
+                    if (const double o12 = segOpacity(1, 2); o12 > 0.0)
+                        addLine(render[1], render[2], o12);
+                    addLabel(render[1], displayText, opacities[1]);
+                }
+            } else if (type == 3 && render.size() >= 2) {
+                for (std::size_t i = 1; i < render.size(); ++i) {
+                    const double opacity = segOpacity(i - 1, i);
+                    if (opacity > 0.0)
+                        addLine(render[i - 1], render[i], opacity);
+                }
+                if (render.size() >= 3) {
+                    const double opacity = segOpacity(render.size() - 1, 0);
+                    if (opacity > 0.0)
+                        addLine(render.back(), render.front(), opacity);
+                }
+                double cx = 0.0;
+                double cy = 0.0;
+                double cz = 0.0;
+                double labelOpacity = 0.0;
+                for (std::size_t i = 0; i < render.size(); ++i) {
+                    cx += render[i][0];
+                    cy += render[i][1];
+                    cz += render[i][2];
+                    labelOpacity = std::max(labelOpacity, opacities[i]);
+                }
+                const double n = static_cast<double>(render.size());
+                addLabel({cx / n, cy / n, cz / n}, displayText, labelOpacity);
+            }
         }
 
-        double world[3];
-        double worldPoint[4];
-        double dataPoint[4];
-        double continuousIndex[3];
-        picker->GetPickPosition(world);
-        worldPoint[0] = world[0];
-        worldPoint[1] = world[1];
-        worldPoint[2] = world[2];
-        worldPoint[3] = 1.0;
-        pipeline->worldToRenderData->MultiplyPoint(worldPoint, dataPoint);
-        pipeline->image->TransformPhysicalPointToContinuousIndex(dataPoint, continuousIndex);
-        const int *dimensions = pipeline->image->GetDimensions();
-        std::array<int, 3> index {
-            static_cast<int>(std::lround(continuousIndex[0])),
-            static_cast<int>(std::lround(continuousIndex[1])),
-            static_cast<int>(std::lround(continuousIndex[2]))
-        };
-        for (int axis = 0; axis < 3; ++axis)
-            index[axis] = std::clamp(index[axis], 0, dimensions[axis] - 1);
-
-        QMetaObject::invokeMethod(view.data(),
-            [view, controller, index, normalizedX, normalizedY]() {
-                if (!view || !controller
-                    || !controller->setRegionGrowingSeed(index[0], index[1], index[2]))
-                    return;
-                emit view->voxelPicked(index[0], index[1], index[2],
-                                       controller->regionGrowingSeedValue(),
-                                       normalizedX, normalizedY);
-            }, Qt::QueuedConnection);
+        pipeline->renderer->ResetCameraClippingRange();
     });
+    scheduleRender();
 }
 
 void MedicalViewportItem::reloadData()
@@ -764,6 +1061,7 @@ void MedicalViewportItem::reloadData()
                             rotationQuarterTurns, flipHorizontal, flipVertical,
                             cropMin, cropMax, width, level, patientOrientation);
     });
+    syncAnnotationActors();
     scheduleRender();
 }
 
@@ -788,8 +1086,7 @@ void MedicalViewportItem::updateRenderState()
             return;
         if (pipeline->sliceMapper && pipeline->image) {
             const int count = pipeline->image->GetDimensions()[orientation];
-            const int slice = std::clamp(static_cast<int>(slicePosition * (count - 1)),
-                                         0, std::max(0, count - 1));
+            const int slice = MarkupsPicker::sliceIndexFromPosition(slicePosition, count);
             pipeline->sliceMapper->SetSliceNumber(slice);
             pipeline->sliceActor->SetVisibility(showImage);
             pipeline->sliceActor->GetProperty()->SetColorWindow(width);

@@ -12,6 +12,7 @@ Item {
 
     property string toolMode: "浏览"
     property int toolModeIndex: 0
+    property int measureSubMode: AnnotationTool.LengthTool
     property int layoutMode: 0
     property bool mip: false
     property int volumePreset: MedicalViewport.BonePreset
@@ -19,6 +20,26 @@ Item {
     property bool showImage: true
     property bool showMeasurements: true
     property real segmentationOpacity: 0.72
+
+    function measureToolLabel() {
+        if (root.toolModeIndex !== 4)
+            return "测量"
+        if (root.measureSubMode === AnnotationTool.MarkTool)
+            return "测量·标记"
+        if (root.measureSubMode === AnnotationTool.AngleTool)
+            return "测量·角度"
+        if (root.measureSubMode === AnnotationTool.PerimeterTool)
+            return "测量·周长"
+        return "测量·长度"
+    }
+
+    function selectMeasureTool(toolType) {
+        root.toolMode = "测量"
+        root.toolModeIndex = 4
+        root.measureSubMode = toolType
+        annotationController.toolType = toolType
+        root.seedPicking = false
+    }
     property bool activePairedProjection: false
     property int frontalRotationQuarterTurns: 0
     property bool frontalFlipHorizontal: false
@@ -60,6 +81,17 @@ Item {
         }
     }
 
+    onShowMeasurementsChanged: annotationController.visible = root.showMeasurements
+    Component.onCompleted: annotationController.visible = root.showMeasurements
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Escape) {
+            annotationController.cancelActive()
+            event.accepted = true
+        }
+    }
+    focus: true
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -76,18 +108,52 @@ Item {
                 spacing: 6
                 ButtonGroup { id: toolGroup }
                 Repeater {
-                    model: ["浏览", "窗宽窗位", "平移", "缩放", "测量"]
+                    model: ["浏览", "窗宽窗位", "平移", "缩放"]
                     delegate: ActionButton {
                         required property string modelData
                         required property int index
                         text: modelData
                         checkable: true
-                        checked: root.toolMode === modelData
+                        checked: root.toolModeIndex === index
                         active: checked
                         ButtonGroup.group: toolGroup
                         onClicked: {
                             root.toolMode = modelData
                             root.toolModeIndex = index
+                            annotationController.toolType = AnnotationTool.NoneTool
+                        }
+                    }
+                }
+                ActionButton {
+                    id: measureButton
+                    text: root.measureToolLabel()
+                    checkable: true
+                    checked: root.toolModeIndex === 4
+                    active: checked
+                    ButtonGroup.group: toolGroup
+                    onClicked: {
+                        if (root.toolModeIndex !== 4)
+                            root.selectMeasureTool(root.measureSubMode || AnnotationTool.LengthTool)
+                        measureMenu.open()
+                    }
+                    Menu {
+                        id: measureMenu
+                        y: measureButton.height + 4
+                        MenuItem {
+                            text: "标记"
+                            onTriggered: root.selectMeasureTool(AnnotationTool.MarkTool)
+                        }
+                        MenuItem {
+                            text: "角度"
+                            onTriggered: root.selectMeasureTool(AnnotationTool.AngleTool)
+                        }
+                        MenuItem {
+                            text: "周长"
+                            onTriggered: root.selectMeasureTool(AnnotationTool.PerimeterTool)
+                        }
+                        MenuItem {
+                            text: "长度测量"
+                            onTriggered: root.selectMeasureTool(AnnotationTool.LengthTool)
                         }
                     }
                 }
@@ -150,6 +216,7 @@ Item {
                         viewColor: Theme.axial
                         toolMode: root.toolMode
                         toolModeIndex: root.toolModeIndex
+                        measureSubMode: root.measureSubMode
                         showImage: root.showImage
                         showSegmentation: false
                         showMeasurements: root.showMeasurements
@@ -169,6 +236,7 @@ Item {
                         viewColor: Theme.coronal
                         toolMode: root.toolMode
                         toolModeIndex: root.toolModeIndex
+                        measureSubMode: root.measureSubMode
                         showImage: root.showImage
                         showSegmentation: false
                         showMeasurements: root.showMeasurements
@@ -208,6 +276,7 @@ Item {
                         viewColor: Theme.axial
                         toolMode: root.toolMode
                         toolModeIndex: root.toolModeIndex
+                        measureSubMode: root.measureSubMode
                         showImage: root.showImage
                         showSegmentation: root.showSegmentation
                         showMeasurements: root.showMeasurements
@@ -229,6 +298,7 @@ Item {
                         viewColor: Theme.coronal
                         toolMode: root.toolMode
                         toolModeIndex: root.toolModeIndex
+                        measureSubMode: root.measureSubMode
                         showImage: root.showImage
                         showSegmentation: root.showSegmentation
                         showMeasurements: root.showMeasurements
@@ -250,6 +320,7 @@ Item {
                         viewColor: Theme.sagittal
                         toolMode: root.toolMode
                         toolModeIndex: root.toolModeIndex
+                        measureSubMode: root.measureSubMode
                         showImage: root.showImage
                         showSegmentation: root.showSegmentation
                         showMeasurements: root.showMeasurements
@@ -272,6 +343,7 @@ Item {
                         viewColor: Theme.volume
                         toolMode: root.toolMode
                         toolModeIndex: root.toolModeIndex
+                        measureSubMode: root.measureSubMode
                         showImage: root.showImage
                         mip: root.mip
                         volumePreset: root.volumePreset
