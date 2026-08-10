@@ -703,6 +703,14 @@ bool MedicalDataController::activeVolumeVisible() const
         && m_volumeNodes[static_cast<std::size_t>(m_selectedVolumeIndex)]->visible;
 }
 
+QString MedicalDataController::activeVolumeId() const
+{
+    if (m_selectedVolumeIndex < 0
+        || m_selectedVolumeIndex >= static_cast<int>(m_volumeNodes.size()))
+        return {};
+    return m_volumeNodes[static_cast<std::size_t>(m_selectedVolumeIndex)]->id;
+}
+
 bool MedicalDataController::selectVolume(int index)
 {
     if (index < 0 || index >= static_cast<int>(m_volumeNodes.size())) {

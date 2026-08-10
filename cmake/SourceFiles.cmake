@@ -44,4 +44,5 @@ set(CT_UI_QML_FILES
     qml/pages/WorkstationPage.qml
     qml/workstation/DataPanel.qml
     qml/workstation/InspectorPanel.qml
+    qml/workstation/MarkupsTreePanel.qml
 )

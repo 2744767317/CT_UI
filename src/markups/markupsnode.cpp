@@ -28,9 +28,11 @@ void refreshMarkupsMetrics(MarkupsNode *node)
             node->metric = MarkupsMetrics::angleDegrees(node->controlPoints[0],
                                                        node->controlPoints[1],
                                                        node->controlPoints[2]);
-            node->displayText = QStringLiteral("%1: %2°")
+            const double rad = static_cast<double>(node->metric) * M_PI / 180.0;
+            node->displayText = QStringLiteral("%1: %2° (%3rad)")
                                     .arg(node->label)
-                                    .arg(node->metric, 0, 'f', 1);
+                                    .arg(node->metric, 0, 'f', 1)
+                                    .arg(rad, 0, 'f', 2);
         } else {
             node->metric = 0.0;
             node->displayText = node->label;

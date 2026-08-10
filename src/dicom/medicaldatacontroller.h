@@ -138,6 +138,8 @@ public:
     Q_INVOKABLE bool selectSeries(int index);
     Q_INVOKABLE bool selectVolume(int index);
     Q_INVOKABLE bool renameVolume(int index, const QString &name);
+    /// 当前活动数据集的稳定 id（供标注按数据集绑定）。
+    Q_INVOKABLE QString activeVolumeId() const;
     Q_INVOKABLE bool removeVolume(int index);
     Q_INVOKABLE bool setVolumeVisibility(int index, bool visible);
     Q_INVOKABLE bool exportDicomCopy(const QUrl &destination);

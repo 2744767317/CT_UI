@@ -80,7 +80,14 @@ Rectangle {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: modelData.modality + "  ·  " + modelData.dimensions
+                            text: {
+                                var base = modelData.modality + "  ·  " + modelData.dimensions
+                                var mk = annotationController.markCountFor(modelData.id)
+                                var ms = annotationController.measureCountFor(modelData.id)
+                                if (mk + ms > 0)
+                                    base += "  ·  标记:" + mk + " 测量:" + ms
+                                return base
+                            }
                             color: Theme.textSecondary
                             font.pixelSize: 11
                             elide: Text.ElideRight
@@ -152,6 +159,12 @@ Rectangle {
                         renameRow.visible = false
                 }
             }
+        }
+
+        // Slicer 风格标注树：逐个标注显隐/删除（作用于当前活动数据集）。
+        MarkupsTreePanel {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 240
         }
 
         Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }

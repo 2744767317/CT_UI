@@ -2,6 +2,8 @@
 
 #include "src/markups/markupspicker.h"
 
+#include <algorithm>
+
 AnnotationController::AnnotationController(QObject *parent)
     : QObject(parent)
 {
@@ -25,6 +27,16 @@ bool AnnotationController::hasActive() const
 int AnnotationController::revision() const
 {
     return m_scene.revision();
+}
+
+int AnnotationController::markCount() const
+{
+    return m_scene.markCount();
+}
+
+int AnnotationController::measureCount() const
+{
+    return m_scene.measureCount();
 }
 
 QVariantList AnnotationController::items() const
@@ -57,8 +69,13 @@ void AnnotationController::setMedicalData(MedicalDataController *data)
     if (m_medicalData) {
         connect(m_medicalData, &MedicalDataController::dataChanged,
                 this, &AnnotationController::onMedicalDataChanged);
+        connect(m_medicalData, &MedicalDataController::volumeNodesChanged,
+                this, [this]() { rebindActiveScene(); emitSceneChanged(); });
     }
-    clearAll();
+    m_scenes.clear();
+    m_activeVolumeId.clear();
+    rebindActiveScene();
+    emitSceneChanged();
 }
 
 void AnnotationController::emitSceneChanged()
@@ -154,7 +171,100 @@ bool AnnotationController::updateControlPointFromVoxel(int nodeId, int pointInde
     return updateControlPoint(nodeId, pointIndex, world.x(), world.y(), world.z());
 }
 
+void AnnotationController::setNodeVisible(int nodeId, bool visible)
+{
+    m_scene.setNodeVisible(nodeId, visible);
+    emitSceneChanged();
+}
+
+void AnnotationController::setNodeColor(int nodeId, const QString &color)
+{
+    m_scene.setNodeColor(nodeId, color);
+    emitSceneChanged();
+}
+
+bool AnnotationController::removeNode(int nodeId)
+{
+    const bool ok = m_scene.removeNode(nodeId);
+    if (ok)
+        emitSceneChanged();
+    return ok;
+}
+
+int AnnotationController::markCountFor(const QString &volumeId) const
+{
+    const MarkupsScene *s = sceneForId(volumeId);
+    return s ? s->markCount() : 0;
+}
+
+int AnnotationController::measureCountFor(const QString &volumeId) const
+{
+    const MarkupsScene *s = sceneForId(volumeId);
+    return s ? s->measureCount() : 0;
+}
+
+MarkupsScene *AnnotationController::sceneForId(const QString &volumeId) const
+{
+    if (volumeId.isEmpty())
+        return nullptr;
+    auto it = const_cast<std::map<QString, MarkupsScene> &>(m_scenes).find(volumeId);
+    if (it == m_scenes.end())
+        return nullptr;
+    return &it->second;
+}
+
 void AnnotationController::onMedicalDataChanged()
 {
-    clearAll();
+    rebindActiveScene();
+    emitSceneChanged();
+}
+
+void AnnotationController::rebindActiveScene()
+{
+    if (!m_medicalData) {
+        m_activeVolumeId.clear();
+        return;
+    }
+
+    // 收集当前所有 volume id，清理已不存在的 scene。
+    const QVariantList nodes = m_medicalData->volumeNodes();
+    std::vector<QString> currentIds;
+    currentIds.reserve(static_cast<std::size_t>(nodes.size()));
+    for (const QVariant &entry : nodes) {
+        const QVariantMap item = entry.toMap();
+        currentIds.push_back(item.value(QStringLiteral("id")).toString());
+    }
+    for (auto it = m_scenes.begin(); it != m_scenes.end();) {
+        if (std::find(currentIds.begin(), currentIds.end(), it->first) == currentIds.end())
+            it = m_scenes.erase(it);
+        else
+            ++it;
+    }
+
+    // 取活动数据集 id（优先用 activeVolumeId()，回退到 volumeNodes）。
+    QString activeId;
+    if (m_medicalData->selectedVolumeIndex() >= 0
+        && m_medicalData->selectedVolumeIndex() < static_cast<int>(nodes.size())) {
+        activeId = m_medicalData->activeVolumeId();
+        if (activeId.isEmpty()) {
+            const QVariantMap item = nodes.at(m_medicalData->selectedVolumeIndex()).toMap();
+            activeId = item.value(QStringLiteral("id")).toString();
+        }
+    }
+
+    if (activeId.isEmpty()) {
+        m_activeVolumeId.clear();
+        return;
+    }
+
+    if (activeId == m_activeVolumeId)
+        return;  // 未切换，保持当前 scene 状态
+
+    // 切换前：把当前工作 scene 回存到旧数据集（若旧数据集仍存在）。
+    if (!m_activeVolumeId.isEmpty() && m_scenes.count(m_activeVolumeId))
+        m_scenes[m_activeVolumeId] = m_scene;
+
+    // 加载目标数据集的 scene（新数据集会默认构造为空 scene）。
+    m_scene = m_scenes[activeId];
+    m_activeVolumeId = activeId;
 }

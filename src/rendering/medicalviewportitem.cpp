@@ -4,6 +4,7 @@
 
 #include <vtkActor.h>
 #include <vtkActor2D.h>
+#include <vtkArcSource.h>
 #include <vtkBillboardTextActor3D.h>
 #include <vtkCamera.h>
 #include <vtkCellArray.h>
@@ -898,6 +899,55 @@ void MedicalViewportItem::syncAnnotationActors()
             pipeline->annotationProps.push_back(actor);
         };
 
+        // 角度标注的顶点弧线：在顶点处沿角平面画一段圆弧，连接两腿。
+        // 半径取较短腿的 30%，弧靠近顶点；法线 = dA×dB 决定角平面，
+        // 2D 抬升后两腿共面正对相机，3D 给真实角平面。
+        auto addArc = [&](const std::array<double, 3> &vertex,
+                          const std::array<double, 3> &endA,
+                          const std::array<double, 3> &endB,
+                          double opacity) {
+            double dA[3] = {endA[0] - vertex[0], endA[1] - vertex[1], endA[2] - vertex[2]};
+            double dB[3] = {endB[0] - vertex[0], endB[1] - vertex[1], endB[2] - vertex[2]};
+            const double lenA = std::sqrt(dA[0] * dA[0] + dA[1] * dA[1] + dA[2] * dA[2]);
+            const double lenB = std::sqrt(dB[0] * dB[0] + dB[1] * dB[1] + dB[2] * dB[2]);
+            if (lenA < 1e-9 || lenB < 1e-9)
+                return;
+            for (int i = 0; i < 3; ++i) {
+                dA[i] /= lenA;
+                dB[i] /= lenB;
+            }
+            double normal[3] = {dA[1] * dB[2] - dA[2] * dB[1],
+                                dA[2] * dB[0] - dA[0] * dB[2],
+                                dA[0] * dB[1] - dA[1] * dB[0]};
+            const double nLen = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1]
+                                          + normal[2] * normal[2]);
+            if (nLen < 1e-9)
+                return;  // 三点共线
+            for (int i = 0; i < 3; ++i)
+                normal[i] /= nLen;
+            const double dot = std::clamp(dA[0] * dB[0] + dA[1] * dB[1] + dA[2] * dB[2],
+                                         -1.0, 1.0);
+            const double angleDeg = std::acos(dot) * 180.0 / M_PI;
+            const double radius = std::min(lenA, lenB) * 0.30;
+            vtkNew<vtkArcSource> arc;
+            arc->SetUseNormalAndAngle(true);
+            arc->SetCenter(vertex[0], vertex[1], vertex[2]);
+            arc->SetNormal(normal[0], normal[1], normal[2]);
+            arc->SetPolarVector(dA[0] * radius, dA[1] * radius, dA[2] * radius);
+            arc->SetAngle(angleDeg);
+            arc->SetResolution(24);
+            arc->Update();
+            vtkNew<vtkPolyDataMapper> mapper;
+            mapper->SetInputData(arc->GetOutput());
+            mapper->ScalarVisibilityOff();
+            auto actor = vtkSmartPointer<vtkActor>::New();
+            actor->SetMapper(mapper);
+            styleActor(actor, opacity);
+            actor->GetProperty()->SetLineWidth(2.0);
+            pipeline->renderer->AddActor(actor);
+            pipeline->annotationProps.push_back(actor);
+        };
+
         // 标签锚点用点的精确世界坐标，偏移改用显示像素，文字像素对齐，
         // 缩放时只在屏幕平移、不重合不跑偏。
         auto addLabel = [&](const std::array<double, 3> &p, const QString &text,
@@ -986,6 +1036,9 @@ void MedicalViewportItem::syncAnnotationActors()
                 if (render.size() >= 3) {
                     if (const double o12 = segOpacity(1, 2); o12 > 0.0)
                         addLine(render[1], render[2], o12);
+                    const double arcOpacity = std::min({opacities[0], opacities[1], opacities[2]});
+                    if (arcOpacity > 0.0)
+                        addArc(render[1], render[0], render[2], arcOpacity);
                     addLabel(render[1], displayText, opacities[1]);
                 }
             } else if (type == 3 && render.size() >= 2) {

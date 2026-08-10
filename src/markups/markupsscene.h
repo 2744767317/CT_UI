@@ -26,6 +26,9 @@ public:
     bool visible() const { return m_visible; }
     void setVisible(bool visible);
 
+    int markCount() const;
+    int measureCount() const;
+
     int revision() const { return m_revision; }
     bool hasActive() const { return m_active.has_value(); }
 
@@ -41,6 +44,10 @@ public:
     bool finishActive();
     void cancelActive();
     void clearAll();
+
+    void setNodeVisible(int nodeId, bool visible);
+    void setNodeColor(int nodeId, const QString &color);
+    bool removeNode(int nodeId);
 
     /// 拖拽编辑：更新已提交节点的控制点（世界坐标）。
     bool updateControlPoint(int nodeId, int pointIndex, const QVector3D &world);

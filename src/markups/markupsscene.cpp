@@ -232,6 +232,56 @@ void MarkupsScene::clearAll()
         bump();
 }
 
+void MarkupsScene::setNodeVisible(int nodeId, bool visible)
+{
+    if (MarkupsNode *node = findNode(nodeId)) {
+        if (node->visible != visible) {
+            node->visible = visible;
+            bump();
+        }
+    }
+}
+
+void MarkupsScene::setNodeColor(int nodeId, const QString &color)
+{
+    if (MarkupsNode *node = findNode(nodeId)) {
+        if (node->color != color) {
+            node->color = color;
+            bump();
+        }
+    }
+}
+
+bool MarkupsScene::removeNode(int nodeId)
+{
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+        if (it->id == nodeId) {
+            m_nodes.erase(it);
+            bump();
+            return true;
+        }
+    }
+    return false;
+}
+
+int MarkupsScene::markCount() const
+{
+    int count = 0;
+    for (const MarkupsNode &node : m_nodes)
+        if (node.type == MarkupsNodeType::Point)
+            ++count;
+    return count;
+}
+
+int MarkupsScene::measureCount() const
+{
+    int count = 0;
+    for (const MarkupsNode &node : m_nodes)
+        if (node.type != MarkupsNodeType::Point)
+            ++count;
+    return count;
+}
+
 bool MarkupsScene::updateControlPoint(int nodeId, int pointIndex, const QVector3D &world)
 {
     MarkupsNode *node = findNode(nodeId);
