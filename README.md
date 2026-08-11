@@ -34,43 +34,125 @@ CUDA     C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8
 
 现有 VTK、ITK、RTK 是 MSVC ABI 的 Debug 二进制库。MinGW 预设只编译同一套 QML 界面和兼容占位后端，不能直接链接这些 MSVC 库。若要在 MinGW 下启用医学能力，必须使用同一 MinGW 工具链重新编译全部医学三方库。
 
-## 快速构建
+## CMake 构建步骤
 
-从仓库根目录执行：
+项目要求 CMake 3.24 或更高版本，并采用 out-of-source build。所有 CMake 缓存、自动生成代码、目标文件、DLL、EXE 和测试结果都写入仓库同级的 `CT_UI-build/`，不会污染源码目录。
+
+### 1. 确认预设和依赖路径
+
+在 PowerShell 中进入仓库根目录并列出预设：
+
+```powershell
+Set-Location E:/A/CT_UI
+cmake --version
+cmake --list-presets
+```
+
+仓库提供两个 configure/build/test preset：
+
+| Preset | 工具链 | 医学后端 | 用途 |
+| --- | --- | --- | --- |
+| `msvc-v143-debug` | Visual Studio 2026、x64、v143 | `ON` | 完整 DICOM、ITK、VTK 工作站，日常开发首选 |
+| `mingw-ui-debug` | Qt MinGW 13.1、x64 | `OFF` | 只验证 QML/UI 和兼容占位后端，不提供真实医学处理 |
+
+`CMakePresets.json` 中记录的是当前开发机的 Qt 和医学 SDK 路径。换机器时应通过不提交 Git 的 `CMakeUserPresets.json` 创建一个继承预设，并覆盖 `CMAKE_PREFIX_PATH`、`Qt6_DIR`、`CT_MEDICAL_SDK_ROOT` 和 `binaryDir`；不要把个人安装路径写进 C++ 或 QML 源文件。
+
+### 2. 首次配置完整 MSVC 医学后端
+
+首次构建、项目移动、工具链变化或三方库路径变化后使用 `--fresh`：
 
 ```powershell
 cmake --preset msvc-v143-debug --fresh
-cmake --build --preset msvc-v143-debug --target CT_UI --parallel 4
-cmake --build --preset msvc-v143-debug --target CT_UI_core_tests --parallel 4
+```
+
+这一步会完成以下工作：
+
+1. 检查 Windows、64 位和 C++17 工具链。
+2. 查找 Qt 6.10 的 Core、Gui、Qml、Quick、QuickControls2、Concurrent 和 Test 模块。
+3. 通过 `cmake/MedicalDependencies.cmake` 查找 VTK 9.5 与 ITK 5.4。
+4. 选择真实的 `medicaldatacontroller.cpp` 和 `medicalviewportitem.cpp`。
+5. 生成 Visual Studio 工程到 `E:/A/CT_UI-build/msvc-v143-debug`。
+
+依赖和源码未变化时，后续通常只需增量构建，不必每次重新运行 `--fresh`。
+
+### 3. 构建主程序
+
+```powershell
+cmake --build --preset msvc-v143-debug --target CT_UI --parallel 8
+```
+
+构建顺序是：先编译共享静态库 `CT_UI_core`，再生成 QML 资源、编译渲染边界并链接桌面程序 `CT_UI`。CMake 会把实际链接到的 VTK/ITK 运行时 DLL 复制到程序目录。
+
+主要产物：
+
+```text
+E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/lib/CT_UI_core.lib
+E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/CT_UI.exe
+```
+
+### 4. 构建并运行测试
+
+测试目标使用 `EXCLUDE_FROM_ALL`，普通主程序构建不会自动编译测试，需要显式执行：
+
+```powershell
+cmake --build --preset msvc-v143-debug --target CT_UI_core_tests --parallel 8
 ctest --preset msvc-v143-debug --output-on-failure
 ```
 
-输出不会写入源码目录：
+测试程序输出到：
 
 ```text
-E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/CT_UI.exe
 E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/tests/CT_UI_core_tests.exe
 ```
 
-只验证 QML/UI 的 MinGW 构建：
+只运行某个 CTest 用例或显示更详细日志时可以使用：
+
+```powershell
+ctest --preset msvc-v143-debug -R core_tests --output-on-failure --verbose
+```
+
+### 5. 运行程序
+
+从命令行启动内存演示数据：
+
+```powershell
+& E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/CT_UI.exe `
+  --demo --workstation
+```
+
+直接打开 DICOM 文件或目录：
+
+```powershell
+& E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/bin/CT_UI.exe `
+  --dicom "E:/path/to/dicom" --workstation
+```
+
+从 Qt Creator 外单独复制程序到新目录时，还需使用同版本 Qt 的 `windeployqt` 部署 Qt Quick 模块和平台插件；医学 DLL 已由构建规则复制，但 Qt 运行环境不会由手工复制一个 EXE 自动获得。
+
+### 6. MinGW UI 兼容构建
+
+MinGW 预设用于验证同一套 QML 和 C++ 接口能否编译，不会链接 MSVC ABI 的 VTK/ITK 库：
 
 ```powershell
 cmake --preset mingw-ui-debug --fresh
-cmake --build --preset mingw-ui-debug --target CT_UI --parallel 4
-cmake --build --preset mingw-ui-debug --target CT_UI_core_tests --parallel 4
+cmake --build --preset mingw-ui-debug --target CT_UI --parallel 8
+cmake --build --preset mingw-ui-debug --target CT_UI_core_tests --parallel 8
 ctest --preset mingw-ui-debug --output-on-failure
 ```
 
-### Qt Creator
+该预设自动选择 `medicaldatacontroller_stub.cpp` 和 `medicalviewportitem_stub.cpp`。需要在 MinGW 下运行真实医学后端时，必须先用相同 MinGW 工具链重新构建 Qt 匹配的 VTK、ITK 和 RTK，不能直接链接现有 MSVC `.lib`。
+
+### 7. Qt Creator 构建
 
 1. 打开仓库根目录的 `CMakeLists.txt`。
 2. 选择 `CT UI - MSVC v143 Debug (Recommended)` CMake Preset。
-3. 确认构建目录为 `E:/A/CT_UI-build/msvc-v143-debug`。
-4. 保持配置为 `Debug`，构建并运行 `CT_UI` 目标。
+3. 确认架构为 x64、工具集为 v143、配置为 Debug。
+4. 确认构建目录为 `E:/A/CT_UI-build/msvc-v143-debug`。
+5. 日常开发构建并运行 `CT_UI`；需要回归测试时再单独构建 `CT_UI_core_tests`。
 
-普通开发只构建 `CT_UI`。测试目标标记为 `EXCLUDE_FROM_ALL`，需要测试时再单独构建 `CT_UI_core_tests`，避免每次修改 UI 都连带链接测试程序。Debug 默认关闭 QML AOT C++ 缓存生成，以减少 QML 修改后的编译量；发布构建可设置 `CT_UI_ENABLE_QML_CACHEGEN=ON`。
+Debug 默认设置 `CT_UI_ENABLE_QML_CACHEGEN=OFF`，减少修改 QML 后产生的 C++ 编译量。制作发布构建时可以启用该选项，但必须同时准备与工具链和配置完全匹配的 Release 版 VTK/ITK 安装树。
 
-如果项目改名或移动后出现 `CMakeCache.txt directory is different`，在 Qt Creator 中执行“构建 > 清除 CMake 配置”，或删除仓库外对应的旧构建目录，再重新配置。不要手工修改 `CMakeCache.txt`。
+如果项目移动后出现 `CMakeCache.txt directory is different`，请运行 `cmake --preset msvc-v143-debug --fresh`，或在 Qt Creator 中执行“构建 > 清除 CMake 配置”。不要手工编辑或移动旧 `CMakeCache.txt`。
 
 ## 第三方库如何引用
 
@@ -117,34 +199,127 @@ ctest --preset msvc-v143-debug --output-on-failure
 
 测试数据不复制进仓库。CT 序列按体数据加载；DX/CR 等投摄影像按单个 SOP Instance 或可识别的正侧位对加载，不会被误组装为三维体。
 
-## 代码分层
+## 源码目录与分层
+
+### 完整目录结构
 
 ```text
 CT_UI/
-  cmake/                    CMake 模块：编译选项、依赖发现、输出与部署
-  docs/                     架构、构建和三方库说明
-  qml/
-    components/             可复用基础组件
-    pages/                  四页主任务流
-    theme/                  颜色、字号和间距令牌
-    workstation/            影像工作站左右面板
-  src/
-    application/            工作流状态与应用编排
-    dicom/                  DICOM、医学数据节点和 ITK 算法
-    rendering/              QML/VTK 边界、MPR、体绘制和叠加
-    main.cpp                进程入口、类型注册和依赖装配
-  tests/
-    CMakeLists.txt           测试目标及运行环境
-    core_tests.cpp           状态机、医学数据和可选真实数据测试
-  CMakeLists.txt             只负责项目级装配
-  CMakePresets.json          本机可复现的 MSVC/MinGW 配置入口
+├─ CMakeLists.txt                 项目入口，只负责目标和模块的总装配
+├─ CMakePresets.json              MSVC/MinGW configure、build、test 预设
+├─ DESIGN_SPEC.md                 页面设计与后续阶段规划
+├─ README.md                      项目入口文档
+├─ cmake/
+│  ├─ CompilerOptions.cmake       编译警告、UTF-8、链接选项和产物目录
+│  ├─ MedicalDependencies.cmake   VTK、ITK、RTK、CUDA 查找与后端开关
+│  ├─ RuntimeDeployment.cmake     复制目标实际依赖的医学运行时 DLL
+│  └─ SourceFiles.cmake           C++ 后端分组和 QML 文件清单
+├─ docs/
+│  ├─ ARCHITECTURE.md             对象职责、线程边界和数据所有权
+│  └─ BUILD_AND_DEPENDENCIES.md   依赖发现、部署和构建故障排查
+├─ qml/
+│  ├─ Main.qml                    应用窗口、页面切换和全局对象接入
+│  ├─ theme/
+│  │  └─ Theme.qml                颜色、字号、圆角和间距令牌
+│  ├─ components/
+│  │  ├─ ActionButton.qml         工具栏通用按钮
+│  │  ├─ StatusPill.qml           状态标签
+│  │  ├─ SeriesSelectionDialog.qml DICOM 序列选择对话框
+│  │  └─ ViewportPane.qml         视口外壳、鼠标键盘交互、切片滑块
+│  ├─ pages/
+│  │  ├─ PatientPage.qml          患者确认
+│  │  ├─ SafetyPage.qml           联锁/安全检查
+│  │  ├─ ScanRangePage.qml        扫描范围设置
+│  │  └─ WorkstationPage.qml      CT/X-ray 影像工作站总布局
+│  └─ workstation/
+│     ├─ DataPanel.qml            数据、导入导出和可见性控制
+│     ├─ InspectorPanel.qml       窗宽窗位、分割和显示参数
+│     └─ MarkupsTreePanel.qml     标点与测量对象树
+├─ src/
+│  ├─ main.cpp                    进程入口、QML 类型注册、控制器装配
+│  ├─ application/
+│  │  └─ workflowcontroller.*     四阶段工作流状态机和页面访问约束
+│  ├─ annotation/
+│  │  └─ annotationcontroller.*   QML 标注 API、数据集场景绑定和通知
+│  ├─ markups/
+│  │  ├─ markupsnode.*            Point List、Line、Angle、Curve 数据节点
+│  │  ├─ markupsscene.*           活动工具、节点生命周期和编辑操作
+│  │  ├─ markupsmetrics.*         长度、角度和曲线采样/度量
+│  │  └─ markupspicker.*          体素、世界、切片和显示坐标变换
+│  ├─ dicom/
+│  │  ├─ dicompresentation.h      投影显示方向和灰度呈现辅助逻辑
+│  │  ├─ medicaldatacontroller.h  医学数据、Volume、分割的稳定公共 API
+│  │  ├─ medicaldatacontroller.cpp 真实 DICOM/ITK 医学后端
+│  │  └─ medicaldatacontroller_stub.cpp MinGW UI 兼容后端
+│  └─ rendering/
+│     ├─ medicalviewportitem.h    QML 可见的统一视口接口
+│     ├─ medicalviewportitem.cpp  VTK MPR、体绘制、标注叠加和拾取
+│     └─ medicalviewportitem_stub.cpp 无 VTK 时的兼容绘制实现
+└─ tests/
+   ├─ CMakeLists.txt              测试目标、链接依赖和 CTest 环境
+   └─ core_tests.cpp              工作流、DICOM、分割、坐标和标注测试
 
-../CT_UI-build/              CMake 缓存、生成代码、目标文件、DLL、EXE 和测试结果
+../CT_UI-build/                   仓库外的全部构建缓存与产物
 ```
 
-仓库内不应出现 `build/`、`artifacts/`、`CMakeFiles/`、DLL、EXE、OBJ 或本地 DICOM 数据。`.qtcreator/` 和 `CMakeUserPresets.json` 也只属于当前机器，不提交 Git。
+### 分层职责
 
-对象职责、线程边界和数据所有权见 [架构说明](docs/ARCHITECTURE.md)。页面设计和后续阶段计划见 [设计说明](DESIGN_SPEC.md)。
+| 层 | 目录/目标 | 职责 | 不应承担的职责 |
+| --- | --- | --- | --- |
+| 启动与装配层 | `src/main.cpp`、根 `CMakeLists.txt` | 创建控制器、注册 QML 类型、选择后端、组装目标 | DICOM 解析、渲染算法或业务状态实现 |
+| 表现与交互层 | `qml/` | 页面布局、工具选择、鼠标键盘事件、属性绑定和状态展示 | 持有 ITK Image、VTK 对象或直接解析 DICOM |
+| 应用流程层 | `src/application/` | 页面工作流和应用级状态约束 | 图像算法与渲染细节 |
+| 标注适配层 | `src/annotation/` | 把 QML 操作映射到当前数据集的 Markups 场景 | VTK Actor 创建和医学像素解码 |
+| 标注领域层 | `src/markups/` | 工具语义、节点、控制点、度量、拾取和坐标变换 | QML 页面和渲染线程对象 |
+| 医学数据层 | `src/dicom/` | DICOM 扫描/解码、Volume 快照、ITK 分割、数据集生命周期 | QML 布局和直接操作 VTK 渲染器 |
+| 渲染边界层 | `src/rendering/` | `QQuickVTKItem`、VTK 管线、相机、MPR/3D 和标注 Actor | 长期持有可变 ITK 对象或修改应用工作流 |
+| 验证层 | `tests/` | 对共享核心库和可选真实数据执行自动化验证 | 被正式程序反向依赖 |
+
+主要依赖方向如下，箭头表示调用或数据依赖：
+
+```text
+QML pages/components
+  ├─> WorkflowController
+  ├─> MedicalDataController ──> ITK/GDCM
+  ├─> AnnotationController ──> MarkupsScene ──> Node/Metrics/Picker
+  └─> MedicalViewportItem ──> VTK
+             │
+             ├─读取 VolumeSnapshot
+             └─读取 AnnotationController 的只读渲染快照
+```
+
+QML 只通过 Qt 属性、信号和 `Q_INVOKABLE` 接口访问 C++。GUI 线程发布不可变像素/标注快照；VTK 对象只在 `QQuickVTKItem` 的渲染上下文中创建和访问。`CT_UI_core` 不依赖 QML 或 `QQuickVTKItem`，因此测试程序可以复用数据与标注逻辑而不启动完整窗口。
+
+### CMake 目标与源码分组
+
+`cmake/SourceFiles.cmake` 把文件分成后端无关部分和可替换后端，根 `CMakeLists.txt` 根据 `CT_ENABLE_MEDICAL_BACKEND` 选择实现：
+
+| 源码集合/目标 | 内容 |
+| --- | --- |
+| `CT_UI_CORE_COMMON_SOURCES` | application、annotation、markups、医学控制器公共头文件 |
+| `CT_UI_MEDICAL_CORE_SOURCES` | 真实 `medicaldatacontroller.cpp` |
+| `CT_UI_COMPATIBILITY_CORE_SOURCES` | 兼容 `medicaldatacontroller_stub.cpp` |
+| `CT_UI_RENDERING_COMMON_SOURCES` | 稳定的 `medicalviewportitem.h` |
+| `CT_UI_MEDICAL_RENDERING_SOURCES` | VTK `medicalviewportitem.cpp` |
+| `CT_UI_COMPATIBILITY_RENDERING_SOURCES` | 无 VTK 的 `medicalviewportitem_stub.cpp` |
+| `CT_UI_QML_FILES` | 所有由 `qt_add_qml_module()` 打包的 QML 文件 |
+| `CT_UI_core` | 主程序和测试共享的静态核心库；医学模式下链接 ITK |
+| `CT_UI` | `main.cpp`、QML、渲染实现和 `CT_UI_core`；医学模式下链接 VTK |
+| `CT_UI_core_tests` | 链接 `CT_UI_core` 与 Qt Test 的独立测试程序 |
+
+新增文件时遵循以下规则：
+
+1. 新的领域/控制器 C++ 文件加入对应的 `CT_UI_*_SOURCES` 集合。
+2. 新 QML 页面或组件必须加入 `CT_UI_QML_FILES`，否则不会被打包进程序。
+3. 真实后端与 stub 必须保持相同公共 API，使两个 preset 都能编译。
+4. 新测试放入 `tests/`；本地 DICOM 数据通过环境变量注入，不复制进仓库。
+5. 新三方依赖只在 `cmake/` 中声明，不在业务源码中写绝对库路径。
+
+### 目录整洁约束
+
+仓库内不应出现 `build/`、`artifacts/`、`CMakeFiles/`、`Testing/`、DLL、EXE、LIB、OBJ、压缩包或本地 DICOM 数据。`.qtcreator/`、`.qtc_clangd/` 和 `CMakeUserPresets.json` 只属于当前机器，已由 `.gitignore` 排除。
+
+对象职责、线程边界和数据所有权见 [架构说明](docs/ARCHITECTURE.md)。更完整的依赖查找与构建故障排查见 [构建与三方库说明](docs/BUILD_AND_DEPENDENCIES.md)，页面设计和后续阶段计划见 [设计说明](DESIGN_SPEC.md)。
 
 ## 开发约定
 
