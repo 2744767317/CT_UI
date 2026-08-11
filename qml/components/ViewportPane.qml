@@ -36,6 +36,7 @@ Rectangle {
     property bool draggingHandle: false
     property int dragNodeId: -1
     property int dragPointIndex: -1
+    property bool middlePanning: false
     signal seedSelected(int viewType, real normalizedX, real normalizedY, real slicePosition)
     signal activated()
 
@@ -83,6 +84,29 @@ Rectangle {
             return true
         }
         return false
+    }
+
+    function beginMiddlePan(mouse) {
+        if (mouse.button !== Qt.MiddleButton)
+            return false
+        root.middlePanning = true
+        root.interactionLast = Qt.point(mouse.x, mouse.y)
+        return true
+    }
+
+    function updateMiddlePan(mouse) {
+        if (!root.middlePanning || !(mouse.buttons & Qt.MiddleButton))
+            return false
+        const dx = mouse.x - root.interactionLast.x
+        const dy = mouse.y - root.interactionLast.y
+        viewport.panBy(dx, dy)
+        root.interactionLast = Qt.point(mouse.x, mouse.y)
+        return true
+    }
+
+    function endMiddlePan(mouse) {
+        if (mouse.button === Qt.MiddleButton)
+            root.middlePanning = false
     }
 
     color: Theme.image
@@ -191,8 +215,12 @@ Rectangle {
         onPressed: mouse => {
             root.activated()
             root.forceActiveFocus()
+            root.beginMiddlePan(mouse)
             mouse.accepted = true
         }
+        onPositionChanged: mouse => root.updateMiddlePan(mouse)
+        onReleased: mouse => root.endMiddlePan(mouse)
+        onCanceled: root.middlePanning = false
         onWheel: wheel => {
             root.handleWheel(wheel)
         }
@@ -240,6 +268,8 @@ Rectangle {
         onPressed: mouse => {
             root.activated()
             root.forceActiveFocus()
+            if (root.beginMiddlePan(mouse))
+                return
             if (mouse.button === Qt.RightButton) {
                 if (root.toolModeIndex === 4
                         && (annotationController.toolType === AnnotationTool.CurveTool
@@ -276,6 +306,8 @@ Rectangle {
             }
         }
         onPositionChanged: mouse => {
+            if (root.updateMiddlePan(mouse))
+                return
             if (!(mouse.buttons & Qt.LeftButton))
                 return
             if (root.toolModeIndex === 1 && pressed) {
@@ -306,13 +338,15 @@ Rectangle {
                             root.dragNodeId, root.dragPointIndex, local.x, local.y)
             }
         }
-        onReleased: {
+        onReleased: mouse => {
+            root.endMiddlePan(mouse)
             if (root.draggingHandle) {
                 root.draggingHandle = false
                 root.dragNodeId = -1
                 root.dragPointIndex = -1
             }
         }
+        onCanceled: root.middlePanning = false
         onDoubleClicked: mouse => {
             if (root.toolModeIndex === 2 || root.toolModeIndex === 3)
                 viewport.resetView()
