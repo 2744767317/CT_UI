@@ -205,6 +205,7 @@ ApplicationWindow {
             spacing: 12
             BusyIndicator { anchors.horizontalCenter: parent.horizontalCenter; running: true }
             Text { text: medicalData.statusMessage; color: Theme.text; font.pixelSize: 16 }
+            Text { text: "后台处理中，界面保持响应；请勿重复选择数据或启动算法。"; color: Theme.textSecondary; font.pixelSize: 13 }
         }
     }
 }

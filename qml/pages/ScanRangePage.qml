@@ -35,6 +35,7 @@ Item {
                     border.color: Theme.border
                     radius: Theme.radius
                     Canvas {
+                        id: rangeCanvas
                         anchors.fill: parent
                         anchors.margins: 24
                         onPaint: {
@@ -61,11 +62,11 @@ Item {
                         }
                         Connections {
                             target: upperRange
-                            function onValueChanged() { parent.requestPaint() }
+                            function onValueChanged() { rangeCanvas.requestPaint() }
                         }
                         Connections {
                             target: lowerRange
-                            function onValueChanged() { parent.requestPaint() }
+                            function onValueChanged() { rangeCanvas.requestPaint() }
                         }
                     }
                     Text { anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 12; text: modelData; color: Theme.text; font.pixelSize: 14; font.weight: Font.DemiBold }

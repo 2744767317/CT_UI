@@ -20,9 +20,18 @@ struct LoadedVolumeNode
     std::shared_ptr<MaskSnapshot> mask;
     double windowWidth = 400.0;
     double windowLevel = 40.0;
+    QString segmentationMethod;
+    qint64 segmentationVoxelCount = 0;
+    double segmentationVolumeMl = 0.0;
     bool projectionUnsigned = false;
+    bool projectionInverted = false;
+    bool projectionPairInverted = false;
     bool visible = true;
 };
+
+// 兼容构建不执行真实异步医学任务，但保留相同的接口契约，方便 QML/UI 验证。
+struct SeriesLoadResult {};
+struct SegmentationResult {};
 
 MedicalDataController::MedicalDataController(QObject *parent)
     : QObject(parent)
@@ -120,6 +129,8 @@ QVariantList MedicalDataController::volumeNodes() const
         item.insert(QStringLiteral("projection"), false);
         item.insert(QStringLiteral("pairedProjection"), false);
         item.insert(QStringLiteral("segmentation"), node->mask != nullptr);
+        item.insert(QStringLiteral("segmentationMethod"), node->segmentationMethod);
+        item.insert(QStringLiteral("segmentationVoxelCount"), node->segmentationVoxelCount);
         item.insert(QStringLiteral("dimensions"), node->volume
             ? QStringLiteral("%1 x %2 x %3").arg(node->volume->dimensions[0])
                   .arg(node->volume->dimensions[1]).arg(node->volume->dimensions[2])
@@ -134,6 +145,14 @@ bool MedicalDataController::activeVolumeVisible() const
     return m_selectedVolumeIndex >= 0
         && m_selectedVolumeIndex < static_cast<int>(m_volumeNodes.size())
         && m_volumeNodes[static_cast<std::size_t>(m_selectedVolumeIndex)]->visible;
+}
+
+QString MedicalDataController::activeVolumeId() const
+{
+    if (m_selectedVolumeIndex < 0
+        || m_selectedVolumeIndex >= static_cast<int>(m_volumeNodes.size()))
+        return {};
+    return m_volumeNodes[static_cast<std::size_t>(m_selectedVolumeIndex)]->id;
 }
 
 bool MedicalDataController::selectVolume(int index)
@@ -205,6 +224,11 @@ bool MedicalDataController::selectSeries(int)
     return false;
 }
 
+void MedicalDataController::selectSeriesAsync(int index)
+{
+    selectSeries(index);
+}
+
 bool MedicalDataController::exportDicomCopy(const QUrl &)
 {
     setError(QStringLiteral("当前 MinGW 构建未启用 DICOM 导出后端。"));
@@ -244,7 +268,7 @@ void MedicalDataController::loadDemoVolume()
 bool MedicalDataController::applyThreshold(double lower, double upper)
 {
     const auto source = volumeSnapshot();
-    if (!source || lower > upper) {
+    if (!source || source->dimensions[2] <= 1 || lower > upper) {
         setError(QStringLiteral("阈值参数无效。"));
         return false;
     }
@@ -262,8 +286,22 @@ bool MedicalDataController::applyThreshold(double lower, double upper)
     }
     updateActiveVolumeNode();
     ++m_segmentationRevision;
+    m_segmentationMethod = QStringLiteral("阈值分割");
+    m_segmentationVoxelCount = 0;
+    for (const unsigned char value : m_mask->pixels)
+        m_segmentationVoxelCount += value != 0;
+    m_segmentationVolumeMl = static_cast<double>(m_segmentationVoxelCount)
+        * source->spacing[0] * source->spacing[1] * source->spacing[2] / 1000.0;
+    m_statusMessage = QStringLiteral("兼容模式阈值分割完成");
+    m_errorMessage.clear();
     emit segmentationChanged();
+    emit statusChanged();
     return true;
+}
+
+void MedicalDataController::applyThresholdAsync(double lower, double upper)
+{
+    applyThreshold(lower, upper);
 }
 
 bool MedicalDataController::setRegionGrowingSeed(int seedX, int seedY, int seedZ)
@@ -293,7 +331,10 @@ void MedicalDataController::clearRegionGrowingSeed()
     m_regionGrowingSeed = {-1, -1, -1};
     m_regionGrowingSeedValue = 0;
     m_regionGrowingSeedValid = false;
+    m_errorMessage.clear();
+    m_statusMessage = QStringLiteral("种子点已清除");
     emit regionGrowingSeedChanged();
+    emit statusChanged();
 }
 
 bool MedicalDataController::applyRegionGrowingFromSeed(double lower, double upper)
@@ -302,15 +343,29 @@ bool MedicalDataController::applyRegionGrowingFromSeed(double lower, double uppe
         setError(QStringLiteral("请先在切片中选择种子点。"));
         return false;
     }
+    if (!std::isfinite(lower) || !std::isfinite(upper) || lower > upper) {
+        setError(QStringLiteral("兼容模式种子生长的 HU 范围无效。"));
+        return false;
+    }
     return applyRegionGrowing(m_regionGrowingSeed[0], m_regionGrowingSeed[1],
                               m_regionGrowingSeed[2], lower, upper);
 }
 
-bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
-                                               double lower, double upper)
+void MedicalDataController::applyRegionGrowingFromSeedAsync(
+    double lower, double upper, bool fullyConnected)
 {
+    Q_UNUSED(fullyConnected)
+    applyRegionGrowingFromSeed(lower, upper);
+}
+
+bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
+                                               double lower, double upper,
+                                               bool fullyConnected)
+{
+    Q_UNUSED(fullyConnected)
     const auto source = volumeSnapshot();
-    if (!source || lower > upper || seedX < 0 || seedY < 0 || seedZ < 0
+    if (!source || !std::isfinite(lower) || !std::isfinite(upper) || lower > upper
+        || seedX < 0 || seedY < 0 || seedZ < 0
         || seedX >= source->dimensions[0] || seedY >= source->dimensions[1]
         || seedZ >= source->dimensions[2]) {
         setError(QStringLiteral("兼容模式种子点或 HU 范围无效。"));
@@ -339,6 +394,12 @@ bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
     }
     updateActiveVolumeNode();
     ++m_segmentationRevision;
+    m_segmentationMethod = QStringLiteral("种子生长（6 邻域）");
+    m_segmentationVoxelCount = 0;
+    for (const unsigned char value : m_mask->pixels)
+        m_segmentationVoxelCount += value != 0;
+    m_segmentationVolumeMl = static_cast<double>(m_segmentationVoxelCount)
+        * source->spacing[0] * source->spacing[1] * source->spacing[2] / 1000.0;
     m_statusMessage = QStringLiteral("兼容模式已生成近似种子生长结果。");
     m_errorMessage.clear();
     emit segmentationChanged();
@@ -352,9 +413,27 @@ void MedicalDataController::clearSegmentation()
         std::lock_guard<std::mutex> guard(m_snapshotMutex);
         m_mask.reset();
     }
+    m_segmentationMethod.clear();
+    m_segmentationVoxelCount = 0;
+    m_segmentationVolumeMl = 0.0;
     updateActiveVolumeNode();
     ++m_segmentationRevision;
     emit segmentationChanged();
+}
+
+bool MedicalDataController::commitSeriesLoad(SeriesLoadResult result)
+{
+    Q_UNUSED(result)
+    return false;
+}
+
+bool MedicalDataController::commitSegmentation(
+    SegmentationResult result, int expectedDatasetRevision, const QString &successMessage)
+{
+    Q_UNUSED(result)
+    Q_UNUSED(expectedDatasetRevision)
+    Q_UNUSED(successMessage)
+    return false;
 }
 
 double MedicalDataController::estimateDistanceMm(int viewType, double pixelDx, double pixelDy,
@@ -426,9 +505,29 @@ void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapsh
     node->projectionPair = std::move(pairSnapshot);
     node->windowWidth = m_windowWidth;
     node->windowLevel = m_windowLevel;
+    node->segmentationMethod = m_segmentationMethod;
+    node->segmentationVoxelCount = m_segmentationVoxelCount;
+    node->segmentationVolumeMl = m_segmentationVolumeMl;
     node->projectionUnsigned = m_projectionUnsigned;
-    m_volumeNodes.push_back(node);
-    activateVolumeNode(static_cast<int>(m_volumeNodes.size()) - 1);
+    node->projectionInverted = m_projectionInverted;
+    node->projectionPairInverted = m_projectionPairInverted;
+
+    int targetIndex = -1;
+    for (int index = 0; index < static_cast<int>(m_volumeNodes.size()); ++index) {
+        if (m_volumeNodes[static_cast<std::size_t>(index)]->id == node->id) {
+            targetIndex = index;
+            node->name = m_volumeNodes[static_cast<std::size_t>(index)]->name;
+            node->visible = m_volumeNodes[static_cast<std::size_t>(index)]->visible;
+            break;
+        }
+    }
+    if (targetIndex < 0) {
+        m_volumeNodes.push_back(node);
+        targetIndex = static_cast<int>(m_volumeNodes.size()) - 1;
+    } else {
+        m_volumeNodes[static_cast<std::size_t>(targetIndex)] = node;
+    }
+    activateVolumeNode(targetIndex);
 }
 
 void MedicalDataController::updateActiveVolumeNode()
@@ -443,6 +542,8 @@ void MedicalDataController::updateActiveVolumeNode()
     node->mask = m_mask;
     node->windowWidth = m_windowWidth;
     node->windowLevel = m_windowLevel;
+    node->projectionInverted = m_projectionInverted;
+    node->projectionPairInverted = m_projectionPairInverted;
 }
 
 void MedicalDataController::activateVolumeNode(int index)
@@ -464,8 +565,13 @@ void MedicalDataController::activateVolumeNode(int index)
     m_seriesDescription = node->name;
     m_sourcePath = node->sourcePath;
     m_projectionUnsigned = node->projectionUnsigned;
+    m_projectionInverted = node->projectionInverted;
+    m_projectionPairInverted = node->projectionPairInverted;
     m_windowWidth = node->windowWidth;
     m_windowLevel = node->windowLevel;
+    m_segmentationMethod = node->segmentationMethod;
+    m_segmentationVoxelCount = node->segmentationVoxelCount;
+    m_segmentationVolumeMl = node->segmentationVolumeMl;
     ++m_datasetRevision;
     ++m_segmentationRevision;
     m_regionGrowingSeed = {-1, -1, -1};
@@ -490,6 +596,9 @@ void MedicalDataController::clearActiveVolume()
     resetMetadata();
     ++m_datasetRevision;
     ++m_segmentationRevision;
+    m_segmentationMethod.clear();
+    m_segmentationVoxelCount = 0;
+    m_segmentationVolumeMl = 0.0;
     emit dataChanged();
     emit segmentationChanged();
     emit volumeNodesChanged();
@@ -514,6 +623,8 @@ void MedicalDataController::resetMetadata()
     m_projectionPairImageType.clear();
     m_projectionPairSopClassName.clear();
     m_projectionUnsigned = false;
+    m_projectionInverted = false;
+    m_projectionPairInverted = false;
     m_sourcePath.clear();
     m_sourceFiles.clear();
 }

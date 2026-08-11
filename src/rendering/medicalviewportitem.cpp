@@ -1,5 +1,6 @@
 #include "medicalviewportitem.h"
 
+#include "src/markups/markupsmetrics.h"
 #include "src/markups/markupspicker.h"
 
 #include <vtkActor.h>
@@ -26,6 +27,7 @@
 #include <vtkNew.h>
 #include <vtkObjectFactory.h>
 #include <vtkPiecewiseFunction.h>
+#include <vtkPointData.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
@@ -36,20 +38,19 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
+#include <vtkShortArray.h>
 #include <vtkSphereSource.h>
 #include <vtkTextActor.h>
 #include <vtkTextProperty.h>
 #include <vtkTubeFilter.h>
+#include <vtkUnsignedCharArray.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <vector>
 
-#include <QMetaObject>
-#include <QPointer>
 #include <QStringList>
 #include <QVariantMap>
 
@@ -66,11 +67,14 @@ public:
     vtkSmartPointer<vtkMatrix4x4> dataToWorld;
     vtkSmartPointer<vtkMatrix4x4> worldToData;
     vtkSmartPointer<vtkMatrix4x4> renderTransform;
-    vtkSmartPointer<vtkMatrix4x4> worldToRenderData;
     vtkSmartPointer<vtkImageData> image;
     vtkSmartPointer<vtkImageData> mask;
+    // VTK 标量数组只读引用快照内存；管线必须持有所有者直到数组被替换。
+    std::shared_ptr<const VolumeSnapshot> imageOwner;
+    std::shared_ptr<const MaskSnapshot> maskOwner;
     vtkSmartPointer<vtkImageSliceMapper> sliceMapper;
     vtkSmartPointer<vtkImageSlice> sliceActor;
+    vtkSmartPointer<vtkLookupTable> imageLookup;
     vtkSmartPointer<vtkImageSliceMapper> maskMapper;
     vtkSmartPointer<vtkImageSlice> maskActor;
     vtkSmartPointer<vtkLookupTable> maskLookup;
@@ -81,6 +85,9 @@ public:
     vtkSmartPointer<vtkVolume> volumeActor;
     vtkSmartPointer<vtkActor> segmentationActor;
     std::vector<vtkSmartPointer<vtkProp>> annotationProps;
+    MarkupsPicker::ImagePresentation imagePresentation;
+    std::array<double, 3> sliceCameraCenter {0.0, 0.0, 0.0};
+    bool sliceCameraCenterValid = false;
 };
 
 vtkStandardNewMacro(ViewportPipeline);
@@ -91,9 +98,11 @@ vtkSmartPointer<vtkImageData> vtkImageFromVolume(const VolumeSnapshot &snapshot)
     image->SetDimensions(snapshot.dimensions.data());
     image->SetSpacing(snapshot.spacing.data());
     image->SetOrigin(0.0, 0.0, 0.0);
-    image->AllocateScalars(VTK_SHORT, 1);
-    std::memcpy(image->GetScalarPointer(), snapshot.pixels.data(),
-                snapshot.pixels.size() * sizeof(short));
+    auto scalars = vtkSmartPointer<vtkShortArray>::New();
+    scalars->SetNumberOfComponents(1);
+    scalars->SetArray(const_cast<short *>(snapshot.pixels.data()),
+                      static_cast<vtkIdType>(snapshot.pixels.size()), 1);
+    image->GetPointData()->SetScalars(scalars);
     return image;
 }
 
@@ -103,8 +112,11 @@ vtkSmartPointer<vtkImageData> vtkImageFromMask(const MaskSnapshot &snapshot)
     image->SetDimensions(snapshot.dimensions.data());
     image->SetSpacing(snapshot.spacing.data());
     image->SetOrigin(0.0, 0.0, 0.0);
-    image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
-    std::memcpy(image->GetScalarPointer(), snapshot.pixels.data(), snapshot.pixels.size());
+    auto scalars = vtkSmartPointer<vtkUnsignedCharArray>::New();
+    scalars->SetNumberOfComponents(1);
+    scalars->SetArray(const_cast<unsigned char *>(snapshot.pixels.data()),
+                      static_cast<vtkIdType>(snapshot.pixels.size()), 1);
+    image->GetPointData()->SetScalars(scalars);
     return image;
 }
 
@@ -122,74 +134,17 @@ void updatePatientTransform(ViewportPipeline *pipeline, const VolumeSnapshot &sn
     vtkMatrix4x4::Invert(pipeline->dataToWorld, pipeline->worldToData);
 }
 
-int automaticProjectionQuarterTurns(const QString &orientation)
-{
-    const QStringList axes = orientation.split(QChar(u'\\'), Qt::SkipEmptyParts);
-    if (axes.size() < 2)
-        return 0;
-    const QString first = axes.at(0).trimmed().toUpper();
-    const QString second = axes.at(1).trimmed().toUpper();
-    if (second == QStringLiteral("F"))
-        return 0;
-    if (second == QStringLiteral("H"))
-        return 2;
-    if (first == QStringLiteral("H"))
-        return 1;
-    if (first == QStringLiteral("F"))
-        return 3;
-    return 0;
-}
-
-vtkSmartPointer<vtkMatrix4x4> displayTransformFor(const VolumeSnapshot &snapshot,
-                                                  bool projection,
-                                                  const QString &patientOrientation,
-                                                  int rotationQuarterTurns,
-                                                  bool flipHorizontal,
-                                                  bool flipVertical)
+vtkSmartPointer<vtkMatrix4x4> displayTransformFor(
+    const MarkupsPicker::ImagePresentation &presentation)
 {
     auto transform = vtkSmartPointer<vtkMatrix4x4>::New();
     transform->Identity();
-    if (!projection)
-        return transform;
-
-    const double width = std::max(0, snapshot.dimensions[0] - 1) * snapshot.spacing[0];
-    const double height = std::max(0, snapshot.dimensions[1] - 1) * snapshot.spacing[1];
-    const double centerX = width * 0.5;
-    const double centerY = height * 0.5;
-
-    auto preMultiply = [&transform](vtkMatrix4x4 *operation) {
-        auto combined = vtkSmartPointer<vtkMatrix4x4>::New();
-        vtkMatrix4x4::Multiply4x4(operation, transform, combined);
-        transform = combined;
-    };
-    auto centeredOperation = [centerX, centerY](double a00, double a01,
-                                                 double a10, double a11) {
-        auto operation = vtkSmartPointer<vtkMatrix4x4>::New();
-        operation->Identity();
-        operation->SetElement(0, 0, a00);
-        operation->SetElement(0, 1, a01);
-        operation->SetElement(1, 0, a10);
-        operation->SetElement(1, 1, a11);
-        operation->SetElement(0, 3, centerX - a00 * centerX - a01 * centerY);
-        operation->SetElement(1, 3, centerY - a10 * centerX - a11 * centerY);
-        return operation;
-    };
-
-    // DICOM pixel row zero is the top row; VTK image coordinates grow upward.
-    preMultiply(centeredOperation(1.0, 0.0, 0.0, -1.0));
-
-    const int automaticTurns = automaticProjectionQuarterTurns(patientOrientation);
-    const int turns = ((automaticTurns + rotationQuarterTurns) % 4 + 4) % 4;
-    if (turns != 0) {
-        constexpr double halfPi = 1.5707963267948966;
-        const double angle = halfPi * turns;
-        preMultiply(centeredOperation(std::cos(angle), -std::sin(angle),
-                                      std::sin(angle), std::cos(angle)));
-    }
-    if (flipHorizontal)
-        preMultiply(centeredOperation(-1.0, 0.0, 0.0, 1.0));
-    if (flipVertical)
-        preMultiply(centeredOperation(1.0, 0.0, 0.0, -1.0));
+    transform->SetElement(0, 0, presentation.linear[0]);
+    transform->SetElement(0, 1, presentation.linear[1]);
+    transform->SetElement(1, 0, presentation.linear[2]);
+    transform->SetElement(1, 1, presentation.linear[3]);
+    transform->SetElement(0, 3, presentation.offset[0]);
+    transform->SetElement(1, 3, presentation.offset[1]);
     return transform;
 }
 
@@ -200,6 +155,47 @@ int orientationFor(MedicalViewportItem::ViewType type)
     if (type == MedicalViewportItem::ViewType::Coronal)
         return 1;
     return 2;
+}
+
+void fitSliceCamera(ViewportPipeline *pipeline, MedicalViewportItem::ViewType type,
+                    const VolumeSnapshot &volume, double viewportWidth,
+                    double viewportHeight, double zoom, double panX, double panY)
+{
+    if (!pipeline || !pipeline->renderer
+        || type == MedicalViewportItem::ViewType::Volume3D
+        || viewportWidth <= 0.0 || viewportHeight <= 0.0)
+        return;
+    const auto size = MarkupsPicker::sliceViewPhysicalSize(
+        volume, static_cast<int>(type), pipeline->imagePresentation);
+    const double aspect = viewportWidth / viewportHeight;
+    const double visibleHeight = std::max(size[1], size[0] / aspect);
+    auto *camera = pipeline->renderer->GetActiveCamera();
+    zoom = std::clamp(zoom, 0.25, 20.0);
+    camera->SetParallelScale(visibleHeight * 0.5 / zoom);
+    if (!pipeline->sliceCameraCenterValid)
+        camera->GetFocalPoint(pipeline->sliceCameraCenter.data());
+
+    double direction[3];
+    double up[3];
+    double right[3];
+    camera->GetDirectionOfProjection(direction);
+    camera->GetViewUp(up);
+    vtkMath::Cross(direction, up, right);
+    vtkMath::Normalize(right);
+    vtkMath::Normalize(up);
+    const double worldPerPixel = 2.0 * camera->GetParallelScale() / viewportHeight;
+    double focal[3];
+    for (int axis = 0; axis < 3; ++axis) {
+        focal[axis] = pipeline->sliceCameraCenter[static_cast<std::size_t>(axis)]
+            - panX * worldPerPixel * right[axis]
+            + panY * worldPerPixel * up[axis];
+    }
+    const double distance = std::max(camera->GetDistance(), 1.0);
+    camera->SetFocalPoint(focal);
+    camera->SetPosition(focal[0] - direction[0] * distance,
+                        focal[1] - direction[1] * distance,
+                        focal[2] - direction[2] * distance);
+    pipeline->sliceCameraCenterValid = true;
 }
 
 void applyVolumePreset(ViewportPipeline *pipeline,
@@ -303,7 +299,8 @@ void applyVolumePreset(ViewportPipeline *pipeline,
 
 void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType type,
                     double slicePosition, double width, double level,
-                    bool showImage, bool showSegmentation, double segmentationOpacity)
+                    bool invertGrayscale, bool showImage, bool showSegmentation,
+                    double segmentationOpacity)
 {
     const int orientation = orientationFor(type);
     const int sliceCount = pipeline->image->GetDimensions()[orientation];
@@ -318,6 +315,18 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
     pipeline->sliceActor->SetUserMatrix(pipeline->renderTransform);
     pipeline->sliceActor->GetProperty()->SetColorWindow(width);
     pipeline->sliceActor->GetProperty()->SetColorLevel(level);
+    if (invertGrayscale) {
+        pipeline->imageLookup = vtkSmartPointer<vtkLookupTable>::New();
+        constexpr int lookupSize = 4096;
+        pipeline->imageLookup->SetNumberOfTableValues(lookupSize);
+        for (int index = 0; index < lookupSize; ++index) {
+            const double gray = 1.0 - static_cast<double>(index) / (lookupSize - 1);
+            pipeline->imageLookup->SetTableValue(index, gray, gray, gray, 1.0);
+        }
+        pipeline->imageLookup->Build();
+        pipeline->sliceActor->GetProperty()->SetLookupTable(pipeline->imageLookup);
+        pipeline->sliceActor->GetProperty()->UseLookupTableScalarRangeOff();
+    }
     pipeline->sliceActor->GetProperty()->SetInterpolationTypeToLinear();
     pipeline->sliceActor->SetVisibility(showImage);
     pipeline->renderer->AddViewProp(pipeline->sliceActor);
@@ -409,17 +418,22 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
                      const std::shared_ptr<const MaskSnapshot> &mask,
                      MedicalViewportItem::ViewType type, double slicePosition,
                      bool mip, MedicalViewportItem::VolumePreset preset,
-                     bool projectionData, bool showImage, bool showSegmentation,
+                     bool projectionData, bool invertGrayscale,
+                     bool showImage, bool showSegmentation,
                      double segmentationOpacity, int rotationQuarterTurns,
-                     bool flipHorizontal, bool flipVertical, double cropMinimum,
-                     double cropMaximum, double width, double level,
-                     const QString &patientOrientation)
+                      bool flipHorizontal, bool flipVertical, double cropMinimum,
+                      double cropMaximum, double width, double level,
+                      const QString &patientOrientation, double viewZoom,
+                      double viewPanX, double viewPanY)
 {
     pipeline->renderer->RemoveAllViewProps();
     pipeline->image = nullptr;
     pipeline->mask = nullptr;
+    pipeline->imageOwner.reset();
+    pipeline->maskOwner.reset();
     pipeline->sliceMapper = nullptr;
     pipeline->sliceActor = nullptr;
+    pipeline->imageLookup = nullptr;
     pipeline->maskMapper = nullptr;
     pipeline->maskActor = nullptr;
     pipeline->maskLookup = nullptr;
@@ -428,34 +442,36 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
     pipeline->volumeActor = nullptr;
     pipeline->segmentationActor = nullptr;
     pipeline->annotationProps.clear();
+    pipeline->sliceCameraCenterValid = false;
 
     if (!volume || volume->pixels.empty())
         return;
 
-    pipeline->image = vtkImageFromVolume(*volume);
+    pipeline->imageOwner = volume;
+    pipeline->image = vtkImageFromVolume(*pipeline->imageOwner);
     updatePatientTransform(pipeline, *volume);
     // 显示翻转/旋转只作用于切片视图；3D 必须保持真实 LPS 世界坐标，
     // 否则 vtkVolume(GPU 路径) 与标注 vtkActor 对翻转矩阵应用不一致而错位。
     const bool applyDisplayTransform = projectionData
         && type != MedicalViewportItem::ViewType::Volume3D;
-    pipeline->renderTransform = displayTransformFor(*volume, applyDisplayTransform,
-                                                     patientOrientation,
-                                                     rotationQuarterTurns,
-                                                     flipHorizontal, flipVertical);
+    pipeline->imagePresentation = MarkupsPicker::imagePresentationFor(
+        *volume, applyDisplayTransform, patientOrientation, rotationQuarterTurns,
+        flipHorizontal, flipVertical);
+    pipeline->renderTransform = displayTransformFor(pipeline->imagePresentation);
     auto combined = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Multiply4x4(pipeline->dataToWorld, pipeline->renderTransform, combined);
     pipeline->renderTransform = combined;
-    pipeline->worldToRenderData = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(pipeline->renderTransform, pipeline->worldToRenderData);
-    if (mask && mask->dimensions == volume->dimensions)
-        pipeline->mask = vtkImageFromMask(*mask);
+    if (mask && mask->dimensions == volume->dimensions) {
+        pipeline->maskOwner = mask;
+        pipeline->mask = vtkImageFromMask(*pipeline->maskOwner);
+    }
 
     if (type == MedicalViewportItem::ViewType::Volume3D)
         configureVolume(pipeline, mip, cropMinimum, cropMaximum, preset,
                         showImage, showSegmentation, segmentationOpacity, width, level);
     else
-        configureSlice(pipeline, type, slicePosition, width, level, showImage,
-                       showSegmentation, segmentationOpacity);
+        configureSlice(pipeline, type, slicePosition, width, level, invertGrayscale,
+                       showImage, showSegmentation, segmentationOpacity);
 
     if (renderWindow->GetInteractor()) {
         renderWindow->GetInteractor()->SetDesiredUpdateRate(30.0);
@@ -496,6 +512,15 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
     }
     if (type != MedicalViewportItem::ViewType::Volume3D)
         pipeline->renderer->GetActiveCamera()->ParallelProjectionOn();
+    if (type != MedicalViewportItem::ViewType::Volume3D) {
+        camera->GetFocalPoint(pipeline->sliceCameraCenter.data());
+        pipeline->sliceCameraCenterValid = true;
+        const int *viewportSize = renderWindow->GetSize();
+        fitSliceCamera(pipeline, type, *volume,
+                       static_cast<double>(viewportSize[0]),
+                       static_cast<double>(viewportSize[1]),
+                       viewZoom, viewPanX, viewPanY);
+    }
     pipeline->renderer->ResetCameraClippingRange();
 }
 
@@ -504,6 +529,45 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
 MedicalViewportItem::MedicalViewportItem(QQuickItem *parent)
     : MedicalViewportBase(parent)
 {
+}
+
+int MedicalViewportItem::sliceCount() const
+{
+    if (!m_volume || m_viewType == ViewType::Volume3D)
+        return 0;
+    int axisX = 0;
+    int axisY = 1;
+    int axisZ = 2;
+    MarkupsPicker::viewAxes(static_cast<int>(m_viewType), &axisX, &axisY, &axisZ);
+    (void)axisX;
+    (void)axisY;
+    return std::max(1, m_volume->dimensions[axisZ]);
+}
+
+void MedicalViewportItem::geometryChange(const QRectF &newGeometry,
+                                         const QRectF &oldGeometry)
+{
+    MedicalViewportBase::geometryChange(newGeometry, oldGeometry);
+    if (newGeometry.size() == oldGeometry.size() || !m_volume
+        || m_viewType == ViewType::Volume3D)
+        return;
+    const auto volume = m_volume;
+    const auto type = m_viewType;
+    const double viewportWidth = newGeometry.width();
+    const double viewportHeight = newGeometry.height();
+    const double viewZoom = m_viewZoom;
+    const double viewPanX = m_viewPanX;
+    const double viewPanY = m_viewPanY;
+    dispatch_async([volume, type, viewportWidth, viewportHeight,
+                    viewZoom, viewPanX, viewPanY](
+                       vtkRenderWindow *, vtkUserData userData) {
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
+                       viewZoom, viewPanX, viewPanY);
+        if (pipeline && pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
+    });
+    scheduleRender();
 }
 
 QQuickVTKItem::vtkUserData MedicalViewportItem::initializeVTK(vtkRenderWindow *renderWindow)
@@ -525,16 +589,20 @@ QQuickVTKItem::vtkUserData MedicalViewportItem::initializeVTK(vtkRenderWindow *r
     const double width = m_controller ? m_controller->windowWidth() : 400.0;
     const double level = m_controller ? m_controller->windowLevel() : 40.0;
     const bool projectionData = m_controller && m_controller->projectionData();
+    const bool invertGrayscale = m_controller && projectionData
+        && (m_pairedProjection ? m_controller->projectionPairInverted()
+                               : m_controller->projectionInverted());
     const QString patientOrientation = m_controller
         ? (m_pairedProjection ? m_controller->projectionPairOrientation()
                               : m_controller->patientOrientation())
         : QString();
     rebuildPipeline(pipeline, renderWindow, m_volume, m_mask, m_viewType,
-                    m_slicePosition, m_mip, m_volumePreset, projectionData,
-                    m_showImage, m_showSegmentation, m_segmentationOpacity,
-                    m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical,
-                    m_cropMinimum, m_cropMaximum, width, level,
-                    patientOrientation);
+                     m_slicePosition, m_mip, m_volumePreset, projectionData,
+                    invertGrayscale, m_showImage, m_showSegmentation,
+                     m_segmentationOpacity, m_rotationQuarterTurns,
+                     m_flipHorizontal, m_flipVertical, m_cropMinimum,
+                     m_cropMaximum, width, level, patientOrientation,
+                     m_viewZoom, m_viewPanX, m_viewPanY);
     return pipeline;
 }
 
@@ -543,7 +611,11 @@ void MedicalViewportItem::setViewType(ViewType type)
     if (m_viewType == type)
         return;
     m_viewType = type;
+    m_viewZoom = 1.0;
+    m_viewPanX = 0.0;
+    m_viewPanY = 0.0;
     emit viewTypeChanged();
+    emit sliceCountChanged();
     reloadData();
 }
 
@@ -709,29 +781,39 @@ void MedicalViewportItem::setCropMaximum(double value)
 bool MedicalViewportItem::mapClickToVoxel(double itemX, double itemY, bool updateSeed)
 {
     if (m_viewType == ViewType::Volume3D || !m_controller || !m_volume
-        || width() <= 0.0 || height() <= 0.0) {
+        || width() <= 0.0 || height() <= 0.0
+        || itemX < 0.0 || itemY < 0.0 || itemX > width() || itemY > height()) {
         emit voxelPickFailed(QStringLiteral("当前视图无法拾取体素。"));
         return false;
     }
 
+    const double unzoomedX = width() * 0.5
+        + (itemX - width() * 0.5 - m_viewPanX) / m_viewZoom;
+    const double unzoomedY = height() * 0.5
+        + (itemY - height() * 0.5 - m_viewPanY) / m_viewZoom;
+    const bool projectionData = m_controller && m_controller->projectionData();
+    const QString patientOrientation = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
+                              : m_controller->patientOrientation())
+        : QString();
+    const auto presentation = MarkupsPicker::imagePresentationFor(
+        *m_volume, projectionData && m_viewType != ViewType::Volume3D,
+        patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
     QVector3D world;
     int voxel[3] = {0, 0, 0};
-    if (!MarkupsPicker::mapClickToWorld(*m_volume, static_cast<int>(m_viewType), m_slicePosition,
-                                        itemX, itemY, width(), height(), &world, voxel)) {
+    if (!MarkupsPicker::mapClickToWorld(
+            *m_volume, static_cast<int>(m_viewType), m_slicePosition,
+            unzoomedX, unzoomedY, width(), height(), &world, voxel, presentation)) {
         emit voxelPickFailed(QStringLiteral("点击位置不在当前切片图像内。"));
         return false;
     }
 
-    int hu = 0;
     const auto &dims = m_volume->dimensions;
-    const auto &pixels = m_volume->pixels;
     const std::size_t flat = static_cast<std::size_t>(voxel[0])
         + static_cast<std::size_t>(voxel[1]) * static_cast<std::size_t>(dims[0])
         + static_cast<std::size_t>(voxel[2]) * static_cast<std::size_t>(dims[0])
               * static_cast<std::size_t>(dims[1]);
-    if (flat < pixels.size())
-        hu = pixels[flat];
-
+    const int hu = flat < m_volume->pixels.size() ? m_volume->pixels[flat] : 0;
     if (updateSeed && !m_controller->setRegionGrowingSeed(voxel[0], voxel[1], voxel[2])) {
         emit voxelPickFailed(QStringLiteral("无法设置种子点。"));
         return false;
@@ -740,8 +822,95 @@ bool MedicalViewportItem::mapClickToVoxel(double itemX, double itemY, bool updat
     const double normalizedX = std::clamp(itemX / width(), 0.0, 1.0);
     const double normalizedY = std::clamp(itemY / height(), 0.0, 1.0);
     const int value = updateSeed ? m_controller->regionGrowingSeedValue() : hu;
-    emit voxelPicked(voxel[0], voxel[1], voxel[2], value, normalizedX, normalizedY);
+    emit voxelPicked(voxel[0], voxel[1], voxel[2], value,
+                     normalizedX, normalizedY);
     return true;
+}
+
+bool MedicalViewportItem::beginAnnotationInteraction(double itemX, double itemY,
+                                                     double tolerancePx)
+{
+    if (m_viewType == ViewType::Volume3D || !m_volume || !m_annotations
+        || !m_annotations->visible() || !m_showAnnotations
+        || width() <= 0.0 || height() <= 0.0
+        || itemX < 0.0 || itemY < 0.0 || itemX > width() || itemY > height()) {
+        emit voxelPickFailed(QStringLiteral("当前视图无法添加标注点。"));
+        return false;
+    }
+    if (m_annotations->toolType() == AnnotationController::NoneTool) {
+        emit voxelPickFailed(QStringLiteral("请先选择标记或测量工具。"));
+        return false;
+    }
+
+    if (!m_annotations->hasActive()) {
+        const QVariantMap hit = hitTestControlPoint(itemX, itemY, tolerancePx);
+        if (hit.contains(QStringLiteral("nodeId"))) {
+            emit annotationControlPointPressed(
+                hit.value(QStringLiteral("nodeId")).toInt(),
+                hit.value(QStringLiteral("pointIndex")).toInt());
+            return true;
+        }
+    }
+
+    QVector3D world;
+    const double unzoomedX = width() * 0.5
+        + (itemX - width() * 0.5 - m_viewPanX) / m_viewZoom;
+    const double unzoomedY = height() * 0.5
+        + (itemY - height() * 0.5 - m_viewPanY) / m_viewZoom;
+    const bool projectionData = m_controller && m_controller->projectionData();
+    const QString patientOrientation = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
+                              : m_controller->patientOrientation())
+        : QString();
+    const auto presentation = MarkupsPicker::imagePresentationFor(
+        *m_volume, projectionData && m_viewType != ViewType::Volume3D,
+        patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
+    if (!MarkupsPicker::mapClickToWorld(
+            *m_volume, static_cast<int>(m_viewType), m_slicePosition,
+            unzoomedX, unzoomedY, width(), height(), &world, nullptr, presentation)) {
+        emit voxelPickFailed(QStringLiteral("点击位置不在当前切片图像内。"));
+        return false;
+    }
+    const QString annotationViewId = projectionData
+        ? (m_pairedProjection ? QStringLiteral("projection-pair")
+                              : QStringLiteral("projection-primary"))
+        : QString();
+    if (!m_annotations->addWorldPointForView(
+            world.x(), world.y(), world.z(), annotationViewId)) {
+        emit voxelPickFailed(QStringLiteral("无法添加标注点，请重新选择测量工具。"));
+        return false;
+    }
+    return true;
+}
+
+bool MedicalViewportItem::updateAnnotationControlPoint(int nodeId, int pointIndex,
+                                                       double itemX, double itemY)
+{
+    if (m_viewType == ViewType::Volume3D || !m_volume || !m_annotations
+        || width() <= 0.0 || height() <= 0.0
+        || itemX < 0.0 || itemY < 0.0 || itemX > width() || itemY > height())
+        return false;
+
+    const double unzoomedX = width() * 0.5
+        + (itemX - width() * 0.5 - m_viewPanX) / m_viewZoom;
+    const double unzoomedY = height() * 0.5
+        + (itemY - height() * 0.5 - m_viewPanY) / m_viewZoom;
+    const bool projectionData = m_controller && m_controller->projectionData();
+    const QString patientOrientation = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
+                              : m_controller->patientOrientation())
+        : QString();
+    const auto presentation = MarkupsPicker::imagePresentationFor(
+        *m_volume, projectionData && m_viewType != ViewType::Volume3D,
+        patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
+    QVector3D world;
+    if (!MarkupsPicker::mapClickToWorld(
+            *m_volume, static_cast<int>(m_viewType), m_slicePosition,
+            unzoomedX, unzoomedY, width(), height(), &world, nullptr, presentation))
+        return false;
+
+    return m_annotations->updateControlPoint(
+        nodeId, pointIndex, world.x(), world.y(), world.z());
 }
 
 void MedicalViewportItem::pickVoxel(double itemX, double itemY, bool updateSeed)
@@ -758,6 +927,14 @@ QVariantMap MedicalViewportItem::hitTestControlPoint(double itemX, double itemY,
         return result;
 
     const QVariantList items = m_annotations->items();
+    const bool projectionData = m_controller && m_controller->projectionData();
+    const QString patientOrientation = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
+                              : m_controller->patientOrientation())
+        : QString();
+    const auto presentation = MarkupsPicker::imagePresentationFor(
+        *m_volume, projectionData && m_viewType != ViewType::Volume3D,
+        patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
     double bestDist2 = tolerancePx * tolerancePx;
     int bestNodeId = -1;
     int bestPointIndex = -1;
@@ -766,6 +943,14 @@ QVariantMap MedicalViewportItem::hitTestControlPoint(double itemX, double itemY,
         const QVariantMap item = entry.toMap();
         if (!item.value(QStringLiteral("visible"), true).toBool())
             continue;
+        const QString itemViewId = item.value(QStringLiteral("viewId")).toString();
+        const QString viewportViewId = projectionData
+            ? (m_pairedProjection ? QStringLiteral("projection-pair")
+                                  : QStringLiteral("projection-primary"))
+            : QString();
+        if (!viewportViewId.isEmpty() && !itemViewId.isEmpty()
+            && itemViewId != viewportViewId)
+            continue;
         const int nodeId = item.value(QStringLiteral("id")).toInt();
         const QVariantList points = item.value(QStringLiteral("points")).toList();
         for (int pointIndex = 0; pointIndex < points.size(); ++pointIndex) {
@@ -773,15 +958,17 @@ QVariantMap MedicalViewportItem::hitTestControlPoint(double itemX, double itemY,
             const QVector3D world(point.value(QStringLiteral("x")).toFloat(),
                                  point.value(QStringLiteral("y")).toFloat(),
                                  point.value(QStringLiteral("z")).toFloat());
-            if (std::abs(MarkupsPicker::sliceDelta(*m_volume, static_cast<int>(m_viewType),
-                                                   m_slicePosition, world)) > 0)
+            if (!MarkupsPicker::isPointDisplayableOnSlice(
+                    *m_volume, static_cast<int>(m_viewType), m_slicePosition, world))
                 continue;
             double dx = 0.0;
             double dy = 0.0;
             if (!MarkupsPicker::worldToDisplay(*m_volume, static_cast<int>(m_viewType),
                                                m_slicePosition, width(), height(),
-                                               world, &dx, &dy))
+                                               world, &dx, &dy, presentation))
                 continue;
+            dx = width() * 0.5 + m_viewZoom * (dx - width() * 0.5) + m_viewPanX;
+            dy = height() * 0.5 + m_viewZoom * (dy - height() * 0.5) + m_viewPanY;
             const double dist2 = (dx - itemX) * (dx - itemX) + (dy - itemY) * (dy - itemY);
             if (dist2 <= bestDist2) {
                 bestDist2 = dist2;
@@ -798,6 +985,87 @@ QVariantMap MedicalViewportItem::hitTestControlPoint(double itemX, double itemY,
     return result;
 }
 
+void MedicalViewportItem::panBy(double deltaX, double deltaY)
+{
+    if (m_viewType == ViewType::Volume3D || !m_volume
+        || !std::isfinite(deltaX) || !std::isfinite(deltaY))
+        return;
+    m_viewPanX += deltaX;
+    m_viewPanY += deltaY;
+    const auto volume = m_volume;
+    const auto type = m_viewType;
+    const double viewportWidth = width();
+    const double viewportHeight = height();
+    const double viewZoom = m_viewZoom;
+    const double viewPanX = m_viewPanX;
+    const double viewPanY = m_viewPanY;
+    dispatch_async([volume, type, viewportWidth, viewportHeight,
+                    viewZoom, viewPanX, viewPanY](vtkRenderWindow *, vtkUserData userData) {
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
+                       viewZoom, viewPanX, viewPanY);
+        if (pipeline && pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
+    });
+    scheduleRender();
+}
+
+void MedicalViewportItem::zoomBy(double factor, double anchorX, double anchorY)
+{
+    if (m_viewType == ViewType::Volume3D || !m_volume
+        || !std::isfinite(factor) || factor <= 0.0)
+        return;
+    const double oldZoom = m_viewZoom;
+    const double newZoom = std::clamp(oldZoom * factor, 0.25, 20.0);
+    if (qFuzzyCompare(oldZoom, newZoom))
+        return;
+    const double ratio = newZoom / oldZoom;
+    const double centerX = width() * 0.5;
+    const double centerY = height() * 0.5;
+    m_viewPanX = (1.0 - ratio) * (anchorX - centerX) + ratio * m_viewPanX;
+    m_viewPanY = (1.0 - ratio) * (anchorY - centerY) + ratio * m_viewPanY;
+    m_viewZoom = newZoom;
+
+    const auto volume = m_volume;
+    const auto type = m_viewType;
+    const double viewportWidth = width();
+    const double viewportHeight = height();
+    const double viewZoom = m_viewZoom;
+    const double viewPanX = m_viewPanX;
+    const double viewPanY = m_viewPanY;
+    dispatch_async([volume, type, viewportWidth, viewportHeight,
+                    viewZoom, viewPanX, viewPanY](vtkRenderWindow *, vtkUserData userData) {
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
+                       viewZoom, viewPanX, viewPanY);
+        if (pipeline && pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
+    });
+    scheduleRender();
+}
+
+void MedicalViewportItem::resetView()
+{
+    if (m_viewType == ViewType::Volume3D || !m_volume)
+        return;
+    m_viewZoom = 1.0;
+    m_viewPanX = 0.0;
+    m_viewPanY = 0.0;
+    const auto volume = m_volume;
+    const auto type = m_viewType;
+    const double viewportWidth = width();
+    const double viewportHeight = height();
+    dispatch_async([volume, type, viewportWidth, viewportHeight](
+                       vtkRenderWindow *, vtkUserData userData) {
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
+                       1.0, 0.0, 0.0);
+        if (pipeline && pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
+    });
+    scheduleRender();
+}
+
 void MedicalViewportItem::syncAnnotationActors()
 {
     const QVariantList items = (m_annotations && m_showAnnotations)
@@ -808,8 +1076,13 @@ void MedicalViewportItem::syncAnnotationActors()
     const int viewType = static_cast<int>(m_viewType);
     const double slicePosition = m_slicePosition;
     const bool is3d = m_viewType == ViewType::Volume3D;
+    const QString annotationViewId = (m_controller && m_controller->projectionData())
+        ? (m_pairedProjection ? QStringLiteral("projection-pair")
+                              : QStringLiteral("projection-primary"))
+        : QString();
 
-    dispatch_async([items, volume, show, viewType, slicePosition, is3d](
+    dispatch_async([items, volume, show, viewType, slicePosition, is3d,
+                    annotationViewId](
                        vtkRenderWindow *, vtkUserData userData) {
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (!pipeline || !pipeline->renderer)
@@ -822,19 +1095,25 @@ void MedicalViewportItem::syncAnnotationActors()
         if (!show || !volume || items.isEmpty() || !pipeline->renderTransform)
             return;
 
-        constexpr double kRedR = 0.898;
-        constexpr double kRedG = 0.224;
-        constexpr double kRedB = 0.208;
         const double spacingMax = std::max({volume->spacing[0], volume->spacing[1],
                                             volume->spacing[2]});
-        const double radius = spacingMax * (is3d ? 4.5 : 3.6);
+        int axisX = 0;
+        int axisY = 1;
+        int axisZ = 2;
+        MarkupsPicker::viewAxes(viewType, &axisX, &axisY, &axisZ);
+        const double inPlaneSpacing = std::min(volume->spacing[axisX],
+                                               volume->spacing[axisY]);
+        const double radius = is3d
+            ? std::clamp(spacingMax * 1.4, 2.0, 5.0)
+            : std::clamp(inPlaneSpacing * 4.0, 1.5, 4.0);
         const double liftOffset = spacingMax * 0.6;
 
         auto toRenderPoint = [&](const QVector3D &world) -> std::array<double, 3> {
             if (is3d)
                 return {static_cast<double>(world.x()), static_cast<double>(world.y()),
                         static_cast<double>(world.z())};
-            auto p = MarkupsPicker::worldToImagePhysical(*volume, world);
+            auto p = MarkupsPicker::worldToSliceImagePhysical(
+                *volume, viewType, slicePosition, world);
             const double in[4] = {p[0], p[1], p[2], 1.0};
             double out[4] = {0.0, 0.0, 0.0, 1.0};
             pipeline->renderTransform->MultiplyPoint(in, out);
@@ -853,7 +1132,7 @@ void MedicalViewportItem::syncAnnotationActors()
 
         auto styleActor = [&](vtkActor *actor, double opacity) {
             auto *prop = actor->GetProperty();
-            prop->SetColor(kRedR, kRedG, kRedB);
+            prop->SetColor(0.898, 0.224, 0.208);
             prop->SetOpacity(opacity);
             prop->SetLighting(false);
             prop->SetAmbient(1.0);
@@ -890,6 +1169,35 @@ void MedicalViewportItem::syncAnnotationActors()
             line->Update();
             vtkNew<vtkPolyDataMapper> mapper;
             mapper->SetInputData(line->GetOutput());
+            mapper->ScalarVisibilityOff();
+            auto actor = vtkSmartPointer<vtkActor>::New();
+            actor->SetMapper(mapper);
+            styleActor(actor, opacity);
+            actor->GetProperty()->SetLineWidth(2.0);
+            pipeline->renderer->AddActor(actor);
+            pipeline->annotationProps.push_back(actor);
+        };
+
+        auto addPolyline = [&](const std::vector<std::array<double, 3>> &points,
+                               bool closed, double opacity) {
+            if (points.size() < 2 || opacity <= 0.0)
+                return;
+            vtkNew<vtkPoints> vtkPointsData;
+            for (const auto &point : points)
+                vtkPointsData->InsertNextPoint(point[0], point[1], point[2]);
+            vtkNew<vtkCellArray> lines;
+            const vtkIdType cellSize = static_cast<vtkIdType>(points.size())
+                + (closed ? 1 : 0);
+            lines->InsertNextCell(cellSize);
+            for (vtkIdType index = 0; index < static_cast<vtkIdType>(points.size()); ++index)
+                lines->InsertCellPoint(index);
+            if (closed)
+                lines->InsertCellPoint(0);
+            vtkNew<vtkPolyData> polyline;
+            polyline->SetPoints(vtkPointsData);
+            polyline->SetLines(lines);
+            vtkNew<vtkPolyDataMapper> mapper;
+            mapper->SetInputData(polyline);
             mapper->ScalarVisibilityOff();
             auto actor = vtkSmartPointer<vtkActor>::New();
             actor->SetMapper(mapper);
@@ -957,11 +1265,13 @@ void MedicalViewportItem::syncAnnotationActors()
             auto label = vtkSmartPointer<vtkBillboardTextActor3D>::New();
             label->SetInput(text.toUtf8().constData());
             label->SetPosition(p[0], p[1], p[2]);
-            label->SetDisplayOffset(12, 12);
+            // Keep the label close enough that the glyph center remains the obvious
+            // placement location, while still avoiding direct text/glyph overlap.
+            label->SetDisplayOffset(7, 7);
             label->SetForceOpaque(true);
             auto *tp = label->GetTextProperty();
             tp->SetFontSize(is3d ? 16 : 15);
-            tp->SetColor(kRedR, kRedG, kRedB);
+            tp->SetColor(0.898, 0.224, 0.208);
             tp->SetBold(true);
             tp->SetOpacity(std::max(0.85, opacity));
             tp->SetShadow(true);
@@ -971,99 +1281,160 @@ void MedicalViewportItem::syncAnnotationActors()
             pipeline->annotationProps.push_back(label);
         };
 
-        auto opacityForWorld = [&](const QVector3D &world) -> double {
-            if (is3d)
-                return 1.0;
-            const int delta = std::abs(MarkupsPicker::sliceDelta(*volume, viewType,
-                                                                 slicePosition, world));
-            if (delta == 0)
-                return 1.0;
-            if (delta == 1)
-                return 0.40;
-            if (delta == 2)
-                return 0.20;
-            return 0.0;
-        };
-
         for (const QVariant &entry : items) {
             const QVariantMap item = entry.toMap();
             if (!item.value(QStringLiteral("visible"), true).toBool())
+                continue;
+            const QString itemViewId = item.value(QStringLiteral("viewId")).toString();
+            if (!annotationViewId.isEmpty() && !itemViewId.isEmpty()
+                && itemViewId != annotationViewId)
                 continue;
             const QVariantList points = item.value(QStringLiteral("points")).toList();
             if (points.isEmpty())
                 continue;
             const int type = item.value(QStringLiteral("type")).toInt();
+            const bool closed = item.value(QStringLiteral("closed"), false).toBool();
             const QString displayText = item.value(QStringLiteral("displayText")).toString();
             const QString labelText = item.value(QStringLiteral("label")).toString();
 
-            std::vector<std::array<double, 3>> render;
-            std::vector<double> opacities;
-            render.reserve(static_cast<std::size_t>(points.size()));
-            opacities.reserve(static_cast<std::size_t>(points.size()));
+            std::vector<QVector3D> worldPoints;
+            worldPoints.reserve(static_cast<std::size_t>(points.size()));
 
             for (const QVariant &pointEntry : points) {
                 const QVariantMap point = pointEntry.toMap();
                 const QVector3D world(point.value(QStringLiteral("x")).toFloat(),
                                      point.value(QStringLiteral("y")).toFloat(),
                                      point.value(QStringLiteral("z")).toFloat());
-                const double opacity = opacityForWorld(world);
-                render.push_back(toRenderPoint(world));
-                opacities.push_back(opacity);
-                if (opacity > 0.0)
-                    addSphere(render.back(), opacity);
+                worldPoints.push_back(world);
             }
 
-            auto segOpacity = [&](std::size_t a, std::size_t b) {
-                return std::min(opacities[a], opacities[b]);
+            if (is3d) {
+                std::vector<std::array<double, 3>> render;
+                render.reserve(worldPoints.size());
+                for (const QVector3D &world : worldPoints) {
+                    render.push_back(toRenderPoint(world));
+                    addSphere(render.back(), 1.0);
+                }
+                if (type == 0) {
+                    for (std::size_t index = 0; index < render.size(); ++index) {
+                        const QString pointLabel = render.size() == 1
+                            ? labelText
+                            : QStringLiteral("%1-%2").arg(labelText).arg(index + 1);
+                        addLabel(render[index], pointLabel, 1.0);
+                    }
+                } else if (type == 1 && render.size() >= 2) {
+                    addLine(render[0], render[1], 1.0);
+                    addLabel({(render[0][0] + render[1][0]) * 0.5,
+                              (render[0][1] + render[1][1]) * 0.5,
+                              (render[0][2] + render[1][2]) * 0.5}, displayText, 1.0);
+                } else if (type == 2 && render.size() >= 2) {
+                    addLine(render[0], render[1], 1.0);
+                    if (render.size() >= 3) {
+                        addLine(render[1], render[2], 1.0);
+                        addArc(render[1], render[0], render[2], 1.0);
+                        addLabel(render[1], displayText, 1.0);
+                    }
+                } else if (type == 3 && render.size() >= 2) {
+                    const auto samples = MarkupsMetrics::curveSamples(worldPoints, closed);
+                    std::vector<std::array<double, 3>> curveRender;
+                    curveRender.reserve(samples.size());
+                    for (const QVector3D &sample : samples)
+                        curveRender.push_back(toRenderPoint(sample));
+                    addPolyline(curveRender, closed, 1.0);
+                    addLabel(curveRender[curveRender.size() / 2], displayText, 1.0);
+                }
+                continue;
+            }
+
+            std::vector<bool> pointVisible;
+            std::vector<QVector3D> shownGlyphs;
+            pointVisible.reserve(worldPoints.size());
+            for (const QVector3D &world : worldPoints) {
+                const bool visibleOnSlice = MarkupsPicker::isPointDisplayableOnSlice(
+                    *volume, viewType, slicePosition, world);
+                pointVisible.push_back(visibleOnSlice);
+                if (visibleOnSlice) {
+                    addSphere(toRenderPoint(world), 1.0);
+                    shownGlyphs.push_back(world);
+                }
+            }
+
+            auto addIntersection = [&](const QVector3D &world) {
+                constexpr float duplicateToleranceSquared = 1e-6f;
+                for (const QVector3D &shown : shownGlyphs) {
+                    if ((shown - world).lengthSquared() <= duplicateToleranceSquared)
+                        return;
+                }
+                addSphere(toRenderPoint(world), 1.0);
+                shownGlyphs.push_back(world);
+            };
+            auto addSegmentIntersection = [&](const QVector3D &a, const QVector3D &b) {
+                QVector3D intersection;
+                if (MarkupsPicker::segmentSlicePlaneIntersection(
+                        *volume, viewType, slicePosition, a, b, &intersection))
+                    addIntersection(intersection);
+            };
+            auto renderVisibleRuns = [&](const std::vector<QVector3D> &polyline,
+                                         bool polylineClosed) {
+                const auto runs = MarkupsPicker::clipPolylineToSliceSlab(
+                    *volume, viewType, slicePosition, polyline, polylineClosed);
+                for (const auto &run : runs) {
+                    std::vector<std::array<double, 3>> renderRun;
+                    renderRun.reserve(run.size());
+                    for (const QVector3D &world : run)
+                        renderRun.push_back(toRenderPoint(world));
+                    addPolyline(renderRun, false, 1.0);
+                }
+                return runs;
             };
 
-            if (type == 0 && !render.empty()) {
-                addLabel(render[0],
-                         displayText.isEmpty() ? labelText : displayText, opacities[0]);
-            } else if (type == 1 && render.size() >= 2) {
-                const double opacity = segOpacity(0, 1);
-                if (opacity > 0.0) {
-                    addLine(render[0], render[1], opacity);
-                    const std::array<double, 3> mid = {
-                        (render[0][0] + render[1][0]) * 0.5,
-                        (render[0][1] + render[1][1]) * 0.5,
-                        (render[0][2] + render[1][2]) * 0.5};
-                    addLabel(mid, displayText, opacity);
+            if (type == 0) {
+                for (std::size_t index = 0; index < worldPoints.size(); ++index) {
+                    if (!pointVisible[index])
+                        continue;
+                    const QString pointLabel = worldPoints.size() == 1
+                        ? labelText
+                        : QStringLiteral("%1-%2").arg(labelText).arg(index + 1);
+                    addLabel(toRenderPoint(worldPoints[index]), pointLabel, 1.0);
                 }
-            } else if (type == 2 && render.size() >= 2) {
-                if (const double o01 = segOpacity(0, 1); o01 > 0.0)
-                    addLine(render[0], render[1], o01);
-                if (render.size() >= 3) {
-                    if (const double o12 = segOpacity(1, 2); o12 > 0.0)
-                        addLine(render[1], render[2], o12);
-                    const double arcOpacity = std::min({opacities[0], opacities[1], opacities[2]});
-                    if (arcOpacity > 0.0)
-                        addArc(render[1], render[0], render[2], arcOpacity);
-                    addLabel(render[1], displayText, opacities[1]);
+            } else if (type == 1 && worldPoints.size() >= 2) {
+                const auto runs = renderVisibleRuns({worldPoints[0], worldPoints[1]}, false);
+                addSegmentIntersection(worldPoints[0], worldPoints[1]);
+                if (!runs.empty() && pointVisible[0] && pointVisible[1]) {
+                    addLabel(toRenderPoint((worldPoints[0] + worldPoints[1]) * 0.5f),
+                             displayText, 1.0);
                 }
-            } else if (type == 3 && render.size() >= 2) {
-                for (std::size_t i = 1; i < render.size(); ++i) {
-                    const double opacity = segOpacity(i - 1, i);
-                    if (opacity > 0.0)
-                        addLine(render[i - 1], render[i], opacity);
+            } else if (type == 2 && worldPoints.size() >= 2) {
+                renderVisibleRuns({worldPoints[0], worldPoints[1]}, false);
+                addSegmentIntersection(worldPoints[0], worldPoints[1]);
+                if (worldPoints.size() >= 3) {
+                    renderVisibleRuns({worldPoints[1], worldPoints[2]}, false);
+                    addSegmentIntersection(worldPoints[1], worldPoints[2]);
+                    if (pointVisible[0] && pointVisible[1] && pointVisible[2]) {
+                        const auto a = toRenderPoint(worldPoints[0]);
+                        const auto vertex = toRenderPoint(worldPoints[1]);
+                        const auto b = toRenderPoint(worldPoints[2]);
+                        addArc(vertex, a, b, 1.0);
+                        addLabel(vertex, displayText, 1.0);
+                    }
                 }
-                if (render.size() >= 3) {
-                    const double opacity = segOpacity(render.size() - 1, 0);
-                    if (opacity > 0.0)
-                        addLine(render.back(), render.front(), opacity);
+            } else if (type == 3 && worldPoints.size() >= 2) {
+                const auto samples = MarkupsMetrics::curveSamples(worldPoints, closed);
+                const auto runs = renderVisibleRuns(samples, closed);
+                const std::size_t segmentCount = closed ? samples.size() : samples.size() - 1;
+                for (std::size_t index = 0; index < segmentCount; ++index) {
+                    addSegmentIntersection(samples[index],
+                                           samples[(index + 1) % samples.size()]);
                 }
-                double cx = 0.0;
-                double cy = 0.0;
-                double cz = 0.0;
-                double labelOpacity = 0.0;
-                for (std::size_t i = 0; i < render.size(); ++i) {
-                    cx += render[i][0];
-                    cy += render[i][1];
-                    cz += render[i][2];
-                    labelOpacity = std::max(labelOpacity, opacities[i]);
+                const bool anyControlPointVisible = std::any_of(
+                    pointVisible.cbegin(), pointVisible.cend(), [](bool value) { return value; });
+                if (!runs.empty() && anyControlPointVisible) {
+                    const auto longest = std::max_element(
+                        runs.cbegin(), runs.cend(), [](const auto &a, const auto &b) {
+                            return a.size() < b.size();
+                        });
+                    addLabel(toRenderPoint((*longest)[longest->size() / 2]), displayText, 1.0);
                 }
-                const double n = static_cast<double>(render.size());
-                addLabel({cx / n, cy / n, cz / n}, displayText, labelOpacity);
             }
         }
 
@@ -1074,12 +1445,19 @@ void MedicalViewportItem::syncAnnotationActors()
 
 void MedicalViewportItem::reloadData()
 {
-    m_volume = m_controller
+    const auto nextVolume = m_controller
         ? (m_pairedProjection ? m_controller->projectionPairSnapshot()
                               : m_controller->volumeSnapshot())
         : nullptr;
+    if (nextVolume.get() != m_volume.get()) {
+        m_viewZoom = 1.0;
+        m_viewPanX = 0.0;
+        m_viewPanY = 0.0;
+    }
+    m_volume = nextVolume;
     m_mask = (m_controller && !m_pairedProjection)
         ? m_controller->maskSnapshot() : nullptr;
+    emit sliceCountChanged();
     const auto volume = m_volume;
     const auto mask = m_mask;
     const auto type = m_viewType;
@@ -1087,6 +1465,9 @@ void MedicalViewportItem::reloadData()
     const bool mipMode = m_mip;
     const auto preset = m_volumePreset;
     const bool projectionData = m_controller && m_controller->projectionData();
+    const bool invertGrayscale = m_controller && projectionData
+        && (m_pairedProjection ? m_controller->projectionPairInverted()
+                               : m_controller->projectionInverted());
     const bool showImage = m_showImage;
     const bool segmentation = m_showSegmentation;
     const double segmentationOpacity = m_segmentationOpacity;
@@ -1097,22 +1478,29 @@ void MedicalViewportItem::reloadData()
     const double cropMax = m_cropMaximum;
     const double width = m_controller ? m_controller->windowWidth() : 400.0;
     const double level = m_controller ? m_controller->windowLevel() : 40.0;
+    const double viewZoom = m_viewZoom;
+    const double viewPanX = m_viewPanX;
+    const double viewPanY = m_viewPanY;
     const QString patientOrientation = m_controller
         ? (m_pairedProjection ? m_controller->projectionPairOrientation()
                               : m_controller->patientOrientation())
         : QString();
     // Lambda 只捕获不可变快照和值类型，避免渲染线程读取 GUI 对象的可变成员。
     dispatch_async([volume, mask, type, slice, mipMode, preset, projectionData,
+                    invertGrayscale,
                     showImage, segmentation, segmentationOpacity,
                     rotationQuarterTurns, flipHorizontal, flipVertical,
-                    cropMin, cropMax, width, level, patientOrientation](vtkRenderWindow *window,
+                    cropMin, cropMax, width, level, patientOrientation,
+                    viewZoom, viewPanX, viewPanY](vtkRenderWindow *window,
                                                    vtkUserData userData) {
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (pipeline)
             rebuildPipeline(pipeline, window, volume, mask, type, slice, mipMode, preset,
-                            projectionData, showImage, segmentation, segmentationOpacity,
+                            projectionData, invertGrayscale, showImage, segmentation,
+                            segmentationOpacity,
                             rotationQuarterTurns, flipHorizontal, flipVertical,
-                            cropMin, cropMax, width, level, patientOrientation);
+                            cropMin, cropMax, width, level, patientOrientation,
+                            viewZoom, viewPanX, viewPanY);
     });
     syncAnnotationActors();
     scheduleRender();
@@ -1174,6 +1562,8 @@ void MedicalViewportItem::updateRenderState()
             pipeline->volumeMapper->SetCropping(cropMin > 0.0 || cropMax < 1.0);
             applyVolumePreset(pipeline, preset, mipMode, width, level);
         }
+        if (pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
     });
     scheduleRender();
 }

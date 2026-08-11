@@ -26,7 +26,7 @@ CMakeCache.txt  CMakeFiles/  artifacts/  Testing/
 
 | 文件 | 职责 |
 | --- | --- |
-| `CMakeLists.txt` | Qt 查找、主程序装配、医学/兼容实现选择、测试子目录 |
+| `CMakeLists.txt` | Qt 查找、共享核心库、主程序装配、医学/兼容实现选择、测试子目录 |
 | `CMakePresets.json` | 固定生成器、工具集、Qt 路径、SDK 根目录和输出目录 |
 | `cmake/CompilerOptions.cmake` | 警告级别、UTF-8、统一产物目录 |
 | `cmake/MedicalDependencies.cmake` | VTK/ITK/RTK/CUDA 的查找、校验和组件选择 |
@@ -128,7 +128,8 @@ cmake --preset msvc-v143-debug --fresh -DCT_ENABLE_RTK_BACKEND=ON
 | --- | --- | --- |
 | `CT_ENABLE_MEDICAL_BACKEND` | MSVC `ON`，MinGW `OFF` | 启用真实 DICOM、ITK 和 VTK 实现 |
 | `CT_ENABLE_RTK_BACKEND` | `OFF` | 查找并链接 RTK/CUDA，为未来重建功能预留 |
-| `CT_UI_BUILD_TESTS` | `ON` | 构建并注册 `CT_UI_core_tests` |
+| `CT_UI_BUILD_TESTS` | `ON` | 配置并注册测试目标；普通构建仍不编译该目标 |
+| `CT_UI_ENABLE_QML_CACHEGEN` | `OFF` | 生成 QML AOT C++ 缓存；Debug 关闭可明显减少编译量 |
 | `CT_MEDICAL_SDK_ROOT` | `E:/A/GuangSuo` | VTK/ITK 安装目录的共同父目录 |
 | `CT_VTK_INSTALL_DIR` | 根目录派生 | 覆盖 VTK 安装前缀 |
 | `CT_ITK_INSTALL_DIR` | 根目录派生 | 覆盖 ITK/RTK 安装前缀 |
@@ -143,7 +144,8 @@ cmake --preset msvc-v143-debug --fresh -DCT_ENABLE_RTK_BACKEND=ON
 
 ```powershell
 cmake --preset msvc-v143-debug --fresh
-cmake --build --preset msvc-v143-debug --parallel 4
+cmake --build --preset msvc-v143-debug --target CT_UI --parallel 4
+cmake --build --preset msvc-v143-debug --target CT_UI_core_tests --parallel 4
 ctest --preset msvc-v143-debug --output-on-failure
 ```
 
@@ -157,13 +159,18 @@ Qt Creator 操作：
 4. 检查构建目录为 `E:/A/CT_UI-build/msvc-v143-debug`。
 5. 构建并运行 `CT_UI`。
 
+`CT_UI_core` 是主程序和测试共享的静态库，`MedicalDataController` 只编译一次。`CT_UI_core_tests` 使用 `EXCLUDE_FROM_ALL`，Qt Creator 普通构建不会自动构建测试；需要测试时显式选择该目标。
+
+Debug 默认 `CT_UI_ENABLE_QML_CACHEGEN=OFF`，QML 作为资源打包并在运行时加载，避免每个 QML 文件生成一个额外 C++ 编译单元。发布时可打开该选项换取更快的 QML 启动。
+
 Qt Creator 自动创建的 Kit 可能使用 v145。当前 VTK/ITK 工作站可在已验证的 Kit 中使用，但 CUDA 12.8/RTK 开发仍以 preset 固定的 v143 为基线。
 
 ## 8. MinGW UI 兼容构建
 
 ```powershell
 cmake --preset mingw-ui-debug --fresh
-cmake --build --preset mingw-ui-debug --parallel 4
+cmake --build --preset mingw-ui-debug --target CT_UI --parallel 4
+cmake --build --preset mingw-ui-debug --target CT_UI_core_tests --parallel 4
 ctest --preset mingw-ui-debug --output-on-failure
 ```
 
@@ -200,6 +207,7 @@ E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/tests/CT_UI_core_tests.exe
 $env:CT_UI_TEST_DICOM_DIR = "E:/path/to/one/dicom/series"
 $env:CT_UI_TEST_LIDC_ROOT = "E:/A/LIDC-IDRI-0001"
 $env:CT_UI_TEST_XRAY_ROOT = "E:/A/X_TEST"
+cmake --build --preset msvc-v143-debug --target CT_UI_core_tests --parallel 4
 ctest --preset msvc-v143-debug --output-on-failure
 ```
 
@@ -232,7 +240,7 @@ E:/A/GuangSuo/ITK_INSTALL/install_debug/lib/cmake/ITK-5.4/ITKConfig.cmake
 
 ### LNK4099 提示缺少 ITK/VNL PDB
 
-现有 ITK Debug 安装包的部分静态库没有同时安装 PDB，链接器会提示 `LNK4099`。这不会影响程序生成和运行，只表示调试器无法进入对应三方库内部查看符号。需要消除该提示时，应在构建 ITK 时生成并安装匹配 PDB，而不是在本项目中全局关闭链接警告。
+现有 ITK Debug 安装包的部分静态库没有同时安装 PDB。项目只对主程序和测试目标忽略已确认的 `LNK4099`，其他链接警告仍保留，避免 Qt Creator 被数十条重复警告刷屏。需要进入这些三方库调试时，应重新构建并安装匹配的 ITK/VNL PDB。
 
 ### MinGW 无法链接医学库
 

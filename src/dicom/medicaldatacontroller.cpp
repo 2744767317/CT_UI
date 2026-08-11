@@ -1,11 +1,14 @@
 #include "medicaldatacontroller.h"
 
+#include "dicompresentation.h"
+
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QSet>
+#include <QThread>
 #include <QVariantMap>
 #include <QFutureWatcher>
 
@@ -21,9 +24,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
+#include <iostream>
 #include <limits>
+#include <mutex>
+#include <ostream>
 #include <stdexcept>
+#include <streambuf>
 
 #ifdef Q_OS_WIN
 #include <Windows.h>
@@ -55,8 +61,6 @@ struct DicomSeriesCandidate
     QString patientOrientation;
     QString projectionViewKey;
     QString projectionViewLabel;
-    QString photometricInterpretation;
-    QString presentationLutShape;
     QString projectionVariant;
     std::vector<Instance> instances;
     double windowWidth = 0.0;
@@ -66,6 +70,7 @@ struct DicomSeriesCandidate
     int frames = 1;
     bool projection = false;
     bool unsignedPixels = false;
+    bool inverted = false;
     bool volume = false;
 };
 
@@ -98,11 +103,71 @@ struct LoadedVolumeNode
     std::shared_ptr<MaskSnapshot> mask;
     double windowWidth = 400.0;
     double windowLevel = 40.0;
+    QString segmentationMethod;
+    qint64 segmentationVoxelCount = 0;
+    double segmentationVolumeMl = 0.0;
     bool projectionUnsigned = false;
+    bool projectionInverted = false;
+    bool projectionPairInverted = false;
     bool visible = true;
 };
 
+struct SeriesLoadResult
+{
+    int index = -1;
+    std::shared_ptr<DicomSeriesCandidate> candidate;
+    std::shared_ptr<DicomSeriesCandidate> pairCandidate;
+    std::shared_ptr<VolumeSnapshot> snapshot;
+    std::shared_ptr<VolumeSnapshot> pairSnapshot;
+    QStringList sourceFiles;
+    QStringList pairSourceFiles;
+    QString error;
+};
+
+struct SegmentationResult
+{
+    std::shared_ptr<MaskSnapshot> mask;
+    qint64 selectedVoxelCount = 0;
+    double selectedVolumeMl = 0.0;
+    QString method;
+    QString error;
+};
+
 namespace {
+
+class NullStreamBuffer final : public std::streambuf
+{
+protected:
+    int_type overflow(int_type character) override { return character; }
+};
+
+class ScopedGdcmOutputSilencer final
+{
+public:
+    ScopedGdcmOutputSilencer()
+        : lock(globalMutex())
+        , previous(std::cerr.rdbuf(&buffer()))
+    {
+    }
+
+    ~ScopedGdcmOutputSilencer() { std::cerr.rdbuf(previous); }
+
+private:
+    static std::mutex &globalMutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static NullStreamBuffer &buffer()
+    {
+        static NullStreamBuffer buffer;
+        return buffer;
+    }
+
+    std::unique_lock<std::mutex> lock;
+    std::streambuf *previous = nullptr;
+};
 
 using Image3D = itk::Image<short, 3>;
 using Image2D = itk::Image<short, 2>;
@@ -220,6 +285,9 @@ struct DicomScanResult
 
 DicomScanResult scanDicomDirectory(const QString &path)
 {
+    // LIDC 等公开数据的合法私有标签会让 ITKIOGDCM DLL 输出大量重复 Warning。
+    // 只在后台 DICOM 操作期间屏蔽 stderr，真正的异常仍转换为 errorMessage。
+    ScopedGdcmOutputSilencer silenceGdcmOutput;
     DicomScanResult result;
     const QFileInfo sourceInfo(path);
     if (!sourceInfo.exists()) {
@@ -306,8 +374,11 @@ DicomScanResult scanDicomDirectory(const QString &path)
                         : QStringLiteral("volume");
                     candidate->projectionViewLabel = projectionViewLabelFor(
                         candidate->projectionViewKey);
-                    candidate->photometricInterpretation = dicomText(dictionary, "0028|0004");
-                    candidate->presentationLutShape = dicomText(dictionary, "2050|0020");
+                    // Keep projection scalars unchanged; the renderer applies this
+                    // display polarity after the stored-value/window-level pipeline.
+                    candidate->inverted = DicomPresentation::grayscaleInverted(
+                        dicomText(dictionary, "0028|0004"),
+                        dicomText(dictionary, "2050|0020"));
                     candidate->projectionVariant = candidate->imageType.toUpper().contains(
                         QStringLiteral("DERIVED")) ? QStringLiteral("derived")
                                                      : QStringLiteral("original");
@@ -490,21 +561,6 @@ std::shared_ptr<VolumeSnapshot> readCandidateSnapshot(
     return snapshotFrom2D(reader->GetOutput());
 }
 
-void applyProjectionPhotometric(VolumeSnapshot &snapshot,
-                                const DicomSeriesCandidate &candidate)
-{
-    if (!candidate.projection || snapshot.pixels.empty())
-        return;
-    const bool inversePhotometric = candidate.photometricInterpretation
-        .trimmed().compare(QStringLiteral("MONOCHROME1"), Qt::CaseInsensitive) == 0;
-    const bool inversePresentation = candidate.presentationLutShape
-        .trimmed().compare(QStringLiteral("INVERSE"), Qt::CaseInsensitive) == 0;
-    if (!inversePhotometric && !inversePresentation)
-        return;
-    for (short &value : snapshot.pixels)
-        value = static_cast<short>(32767 - static_cast<int>(value));
-}
-
 int projectionPairIndex(const std::vector<std::shared_ptr<DicomSeriesCandidate>> &candidates,
                         int selectedIndex)
 {
@@ -565,23 +621,145 @@ Image3D::Pointer itkImageFromSnapshot(const VolumeSnapshot &snapshot)
     image->SetSpacing(spacing);
     image->SetOrigin(origin);
     image->SetDirection(direction);
-    image->Allocate();
-    std::memcpy(image->GetBufferPointer(), snapshot.pixels.data(),
-                snapshot.pixels.size() * sizeof(short));
+    // 分割任务持有不可变 VolumeSnapshot，ITK 可以直接只读其像素缓冲区。
+    // 不再为每次算法执行复制整套 CT，降低峰值内存和启动延迟。
+    image->GetPixelContainer()->SetImportPointer(
+        const_cast<short *>(snapshot.pixels.data()), snapshot.pixels.size(), false);
     return image;
 }
 
 std::shared_ptr<MaskSnapshot> maskSnapshotFromItk(const MaskImage *image,
-                                                 const VolumeSnapshot &source)
+                                                 const VolumeSnapshot &source,
+                                                 qint64 *selectedVoxelCount = nullptr)
 {
     auto mask = std::make_shared<MaskSnapshot>();
     mask->dimensions = source.dimensions;
     mask->spacing = source.spacing;
     mask->origin = source.origin;
     mask->direction = source.direction;
-    mask->pixels.assign(image->GetBufferPointer(),
-                        image->GetBufferPointer() + source.pixels.size());
+    const auto *input = image->GetBufferPointer();
+    mask->pixels.resize(source.pixels.size());
+    qint64 selected = 0;
+    for (std::size_t index = 0; index < source.pixels.size(); ++index) {
+        const unsigned char value = input[index] != 0 ? 1 : 0;
+        mask->pixels[index] = value;
+        selected += value;
+    }
+    if (selectedVoxelCount)
+        *selectedVoxelCount = selected;
     return mask;
+}
+
+unsigned int segmentationWorkUnits()
+{
+    // 给 GUI/VTK 渲染线程保留至少一个逻辑核心，并限制小型工作站上的线程争用。
+    return static_cast<unsigned int>(std::clamp(QThread::idealThreadCount() - 1, 1, 8));
+}
+
+SeriesLoadResult decodeSeries(
+    const std::vector<std::shared_ptr<DicomSeriesCandidate>> &candidates, int index)
+{
+    ScopedGdcmOutputSilencer silenceGdcmOutput;
+    SeriesLoadResult result;
+    result.index = index;
+    if (index < 0 || index >= static_cast<int>(candidates.size())) {
+        result.error = QStringLiteral("所选 DICOM 序列不存在，请重新扫描目录。");
+        return result;
+    }
+
+    result.candidate = candidates[static_cast<std::size_t>(index)];
+    try {
+        result.snapshot = readCandidateSnapshot(*result.candidate, &result.sourceFiles);
+        const int pairIndex = projectionPairIndex(candidates, index);
+        if (pairIndex >= 0) {
+            result.pairCandidate = candidates[static_cast<std::size_t>(pairIndex)];
+            result.pairSnapshot = readCandidateSnapshot(*result.pairCandidate,
+                                                        &result.pairSourceFiles);
+        }
+        if (!result.snapshot || result.snapshot->pixels.empty())
+            result.error = QStringLiteral("DICOM 序列未产生可显示的像素数据。");
+    } catch (const itk::ExceptionObject &error) {
+        result.error = QStringLiteral("DICOM 像素读取失败：%1")
+                           .arg(QString::fromUtf8(error.GetDescription()));
+    } catch (const std::exception &error) {
+        result.error = QStringLiteral("DICOM 像素读取失败：%1")
+                           .arg(QString::fromUtf8(error.what()));
+    }
+    return result;
+}
+
+SegmentationResult thresholdSegmentation(
+    const std::shared_ptr<const VolumeSnapshot> &snapshot, double lower, double upper)
+{
+    SegmentationResult result;
+    result.method = QStringLiteral("阈值分割");
+    try {
+        using Filter = itk::BinaryThresholdImageFilter<Image3D, MaskImage>;
+        auto filter = Filter::New();
+        filter->SetNumberOfWorkUnits(segmentationWorkUnits());
+        filter->SetInput(itkImageFromSnapshot(*snapshot));
+        filter->SetLowerThreshold(static_cast<short>(std::clamp(lower, -32768.0, 32767.0)));
+        filter->SetUpperThreshold(static_cast<short>(std::clamp(upper, -32768.0, 32767.0)));
+        filter->SetInsideValue(1);
+        filter->SetOutsideValue(0);
+        filter->Update();
+        result.mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot,
+                                         &result.selectedVoxelCount);
+    } catch (const itk::ExceptionObject &error) {
+        result.error = QStringLiteral("阈值分割失败：%1")
+                           .arg(QString::fromUtf8(error.GetDescription()));
+    } catch (const std::exception &error) {
+        result.error = QStringLiteral("阈值分割失败：%1")
+                           .arg(QString::fromUtf8(error.what()));
+    }
+    if (result.error.isEmpty() && result.selectedVoxelCount <= 0)
+        result.error = QStringLiteral("当前 HU 范围没有选中任何体素。");
+    if (result.error.isEmpty()) {
+        result.selectedVolumeMl = static_cast<double>(result.selectedVoxelCount)
+            * snapshot->spacing[0] * snapshot->spacing[1] * snapshot->spacing[2] / 1000.0;
+    }
+    return result;
+}
+
+SegmentationResult regionGrowingSegmentation(
+    const std::shared_ptr<const VolumeSnapshot> &snapshot,
+    int seedX, int seedY, int seedZ, double lower, double upper, bool fullyConnected)
+{
+    SegmentationResult result;
+    result.method = fullyConnected ? QStringLiteral("种子生长（26 邻域）")
+                                   : QStringLiteral("种子生长（6 邻域）");
+    try {
+        using Filter = itk::ConnectedThresholdImageFilter<Image3D, MaskImage>;
+        auto filter = Filter::New();
+        filter->SetNumberOfWorkUnits(segmentationWorkUnits());
+        filter->SetInput(itkImageFromSnapshot(*snapshot));
+        filter->SetLower(static_cast<short>(std::clamp(lower, -32768.0, 32767.0)));
+        filter->SetUpper(static_cast<short>(std::clamp(upper, -32768.0, 32767.0)));
+        filter->SetReplaceValue(1);
+        filter->SetConnectivity(fullyConnected ? Filter::FullConnectivity
+                                               : Filter::FaceConnectivity);
+        Image3D::IndexType seed;
+        seed[0] = seedX;
+        seed[1] = seedY;
+        seed[2] = seedZ;
+        filter->SetSeed(seed);
+        filter->Update();
+        result.mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot,
+                                         &result.selectedVoxelCount);
+    } catch (const itk::ExceptionObject &error) {
+        result.error = QStringLiteral("种子生长失败：%1")
+                           .arg(QString::fromUtf8(error.GetDescription()));
+    } catch (const std::exception &error) {
+        result.error = QStringLiteral("种子生长失败：%1")
+                           .arg(QString::fromUtf8(error.what()));
+    }
+    if (result.error.isEmpty() && result.selectedVoxelCount <= 0)
+        result.error = QStringLiteral("种子生长没有产生有效区域，请调整种子点或 HU 范围。");
+    if (result.error.isEmpty()) {
+        result.selectedVolumeMl = static_cast<double>(result.selectedVoxelCount)
+            * snapshot->spacing[0] * snapshot->spacing[1] * snapshot->spacing[2] / 1000.0;
+    }
+    return result;
 }
 
 } // namespace
@@ -687,6 +865,8 @@ QVariantList MedicalDataController::volumeNodes() const
             && node->volume->dimensions[2] == 1 && node->modality != QStringLiteral("CT"));
         item.insert(QStringLiteral("pairedProjection"), node->projectionPair != nullptr);
         item.insert(QStringLiteral("segmentation"), node->mask != nullptr);
+        item.insert(QStringLiteral("segmentationMethod"), node->segmentationMethod);
+        item.insert(QStringLiteral("segmentationVoxelCount"), node->segmentationVoxelCount);
         item.insert(QStringLiteral("dimensions"), node->volume
             ? QStringLiteral("%1 x %2 x %3").arg(node->volume->dimensions[0])
                   .arg(node->volume->dimensions[1]).arg(node->volume->dimensions[2])
@@ -826,7 +1006,10 @@ void MedicalDataController::importDicomAsync(const QUrl &source)
         }
         publishSeriesCandidates(result.candidates);
         if (m_seriesCandidates.size() == 1) {
-            loadSeriesCandidate(0);
+            // 扫描和像素解码是两个独立后台阶段，避免单序列目录在扫描结束时
+            // 又回到 GUI 线程同步解码完整体数据。
+            setBusy(false);
+            selectSeriesAsync(0);
             return;
         }
         m_statusMessage = QStringLiteral("递归扫描完成：发现 %1 个可加载序列或投影，请选择影像。")
@@ -883,98 +1066,107 @@ bool MedicalDataController::selectSeries(int index)
     return loadSeriesCandidate(index);
 }
 
-bool MedicalDataController::loadSeriesCandidate(int index)
+void MedicalDataController::selectSeriesAsync(int index)
 {
+    if (m_busy)
+        return;
     if (index < 0 || index >= static_cast<int>(m_seriesCandidates.size())) {
         setError(QStringLiteral("所选 DICOM 序列不存在，请重新扫描目录。"));
-        setBusy(false);
-        return false;
+        return;
     }
 
     setBusy(true);
     m_errorMessage.clear();
+    m_statusMessage = QStringLiteral("正在后台解码 DICOM 像素…");
     emit statusChanged();
-    const auto candidate = m_seriesCandidates[static_cast<std::size_t>(index)];
 
-    try {
-        const QString firstPath = candidate->instances.front().path;
-        std::shared_ptr<VolumeSnapshot> snapshot;
-        QStringList sourceFiles;
-        snapshot = readCandidateSnapshot(*candidate, &sourceFiles);
-        if (snapshot)
-            applyProjectionPhotometric(*snapshot, *candidate);
+    const auto candidates = m_seriesCandidates;
+    auto *watcher = new QFutureWatcher<SeriesLoadResult>(this);
+    connect(watcher, &QFutureWatcher<SeriesLoadResult>::finished, this,
+            [this, watcher] {
+        auto result = watcher->result();
+        watcher->deleteLater();
+        commitSeriesLoad(std::move(result));
+    });
+    watcher->setFuture(QtConcurrent::run(
+        [candidates, index] { return decodeSeries(candidates, index); }));
+}
 
-        const int pairIndex = projectionPairIndex(m_seriesCandidates, index);
-        std::shared_ptr<VolumeSnapshot> pairSnapshot;
-        QStringList pairSourceFiles;
-        std::shared_ptr<DicomSeriesCandidate> pairCandidate;
-        if (pairIndex >= 0) {
-            pairCandidate = m_seriesCandidates[static_cast<std::size_t>(pairIndex)];
-            pairSnapshot = readCandidateSnapshot(*pairCandidate, &pairSourceFiles);
-            if (pairSnapshot)
-                applyProjectionPhotometric(*pairSnapshot, *pairCandidate);
-        }
+bool MedicalDataController::loadSeriesCandidate(int index)
+{
+    setBusy(true);
+    m_errorMessage.clear();
+    m_statusMessage = QStringLiteral("正在解码 DICOM 像素…");
+    emit statusChanged();
+    return commitSeriesLoad(decodeSeries(m_seriesCandidates, index));
+}
 
-        resetMetadata();
-        m_patientName = candidate->patientName.isEmpty() ? QStringLiteral("未提供")
-                                                         : candidate->patientName;
-        m_patientId = candidate->patientId.isEmpty() ? QStringLiteral("未提供")
-                                                     : candidate->patientId;
-        m_patientSex = candidate->patientSex.isEmpty() ? QStringLiteral("--")
-                                                       : candidate->patientSex;
-        m_patientBirthDate = candidate->patientBirthDate.isEmpty() ? QStringLiteral("--")
-                                                                   : candidate->patientBirthDate;
-        m_modality = candidate->modality;
-        m_studyDescription = candidate->studyDescription.isEmpty()
-            ? QStringLiteral("未命名检查") : candidate->studyDescription;
-        m_studyDate = candidate->studyDate.isEmpty() ? QStringLiteral("--")
-                                                     : candidate->studyDate;
-        m_seriesDescription = candidate->seriesDescription.isEmpty()
-            ? (candidate->projection ? QStringLiteral("X 线投影")
-                                     : QStringLiteral("未命名序列"))
-            : candidate->seriesDescription;
-        m_projectionViewLabel = candidate->projection ? candidate->projectionViewLabel : QString();
-        m_patientOrientation = candidate->projection ? candidate->patientOrientation : QString();
-        m_imageType = candidate->imageType;
-        m_sopClassName = candidate->sopClassName;
-        m_projectionUnsigned = candidate->projection && candidate->unsignedPixels;
-        m_projectionPairViewLabel = pairCandidate ? pairCandidate->projectionViewLabel : QString();
-        m_projectionPairOrientation = pairCandidate ? pairCandidate->patientOrientation : QString();
-        m_projectionPairImageType = pairCandidate ? pairCandidate->imageType : QString();
-        m_projectionPairSopClassName = pairCandidate ? pairCandidate->sopClassName : QString();
-        m_windowWidth = candidate->windowWidth;
-        m_windowLevel = candidate->windowLevel;
-        if (candidate->projection && candidate->unsignedPixels)
-            m_windowLevel -= 32768.0;
-
-        if (m_windowWidth <= 0.0 && snapshot && !snapshot->pixels.empty()) {
-            const auto range = std::minmax_element(snapshot->pixels.begin(), snapshot->pixels.end());
-            m_windowWidth = qMax(1.0, static_cast<double>(*range.second - *range.first));
-            m_windowLevel = (static_cast<double>(*range.second) + *range.first) * 0.5;
-        }
-
-        m_sourcePath = QDir::toNativeSeparators(firstPath);
-        installVolume(std::move(snapshot), sourceFiles, std::move(pairSnapshot), pairSourceFiles);
-        m_selectedSeriesIndex = index;
-        emit selectedSeriesIndexChanged();
-        m_statusMessage = candidate->projection
-            ? QStringLiteral("DICOM %1 投影已载入并完成像素与标签校验").arg(candidate->modality)
-            : QStringLiteral("DICOM %1 序列已载入：%2 个实例")
-                  .arg(candidate->modality).arg(candidate->instances.size());
-        emit windowingChanged();
-        emit statusChanged();
+bool MedicalDataController::commitSeriesLoad(SeriesLoadResult result)
+{
+    if (!result.error.isEmpty()) {
         setBusy(false);
-        return true;
-    } catch (const itk::ExceptionObject &error) {
-        setBusy(false);
-        setError(QStringLiteral("DICOM 像素读取失败：%1")
-                     .arg(QString::fromUtf8(error.GetDescription())));
-    } catch (const std::exception &error) {
-        setBusy(false);
-        setError(QStringLiteral("DICOM 像素读取失败：%1")
-                     .arg(QString::fromUtf8(error.what())));
+        setError(result.error);
+        return false;
     }
-    return false;
+
+    const auto &candidate = result.candidate;
+    const auto &pairCandidate = result.pairCandidate;
+    const QString firstPath = candidate->instances.front().path;
+    resetMetadata();
+    m_patientName = candidate->patientName.isEmpty() ? QStringLiteral("未提供")
+                                                     : candidate->patientName;
+    m_patientId = candidate->patientId.isEmpty() ? QStringLiteral("未提供")
+                                                 : candidate->patientId;
+    m_patientSex = candidate->patientSex.isEmpty() ? QStringLiteral("--")
+                                                   : candidate->patientSex;
+    m_patientBirthDate = candidate->patientBirthDate.isEmpty() ? QStringLiteral("--")
+                                                               : candidate->patientBirthDate;
+    m_modality = candidate->modality;
+    m_studyDescription = candidate->studyDescription.isEmpty()
+        ? QStringLiteral("未命名检查") : candidate->studyDescription;
+    m_studyDate = candidate->studyDate.isEmpty() ? QStringLiteral("--")
+                                                 : candidate->studyDate;
+    m_seriesDescription = candidate->seriesDescription.isEmpty()
+        ? (candidate->projection ? QStringLiteral("X 线投影")
+                                 : QStringLiteral("未命名序列"))
+        : candidate->seriesDescription;
+    m_projectionViewLabel = candidate->projection ? candidate->projectionViewLabel : QString();
+    m_patientOrientation = candidate->projection ? candidate->patientOrientation : QString();
+    m_imageType = candidate->imageType;
+    m_sopClassName = candidate->sopClassName;
+    m_projectionUnsigned = candidate->projection && candidate->unsignedPixels;
+    m_projectionInverted = candidate->projection && candidate->inverted;
+    m_projectionPairInverted = pairCandidate && pairCandidate->inverted;
+    m_projectionPairViewLabel = pairCandidate ? pairCandidate->projectionViewLabel : QString();
+    m_projectionPairOrientation = pairCandidate ? pairCandidate->patientOrientation : QString();
+    m_projectionPairImageType = pairCandidate ? pairCandidate->imageType : QString();
+    m_projectionPairSopClassName = pairCandidate ? pairCandidate->sopClassName : QString();
+    m_windowWidth = candidate->windowWidth;
+    m_windowLevel = candidate->windowLevel;
+    if (candidate->projection && candidate->unsignedPixels)
+        m_windowLevel -= 32768.0;
+
+    if (m_windowWidth <= 0.0 && !result.snapshot->pixels.empty()) {
+        const auto range = std::minmax_element(result.snapshot->pixels.begin(),
+                                               result.snapshot->pixels.end());
+        m_windowWidth = qMax(1.0, static_cast<double>(*range.second - *range.first));
+        m_windowLevel = (static_cast<double>(*range.second) + *range.first) * 0.5;
+    }
+
+    m_sourcePath = QDir::toNativeSeparators(firstPath);
+    installVolume(std::move(result.snapshot), result.sourceFiles,
+                  std::move(result.pairSnapshot), result.pairSourceFiles);
+    m_selectedSeriesIndex = result.index;
+    emit selectedSeriesIndexChanged();
+    m_statusMessage = candidate->projection
+        ? QStringLiteral("DICOM %1 投影已载入并完成像素与标签校验").arg(candidate->modality)
+        : QStringLiteral("DICOM %1 序列已载入：%2 个实例")
+              .arg(candidate->modality).arg(candidate->instances.size());
+    m_errorMessage.clear();
+    emit windowingChanged();
+    emit statusChanged();
+    setBusy(false);
+    return true;
 }
 
 bool MedicalDataController::exportDicomCopy(const QUrl &destination)
@@ -1072,36 +1264,47 @@ void MedicalDataController::loadDemoVolume()
 bool MedicalDataController::applyThreshold(double lower, double upper)
 {
     const auto snapshot = volumeSnapshot();
-    if (!snapshot || lower > upper) {
+    if (!snapshot || snapshot->dimensions[2] <= 1 || lower > upper) {
         setError(QStringLiteral("阈值分割参数无效或尚未载入影像。"));
         return false;
     }
+    const int revision = m_datasetRevision;
+    setBusy(true);
+    m_statusMessage = QStringLiteral("正在执行阈值分割…");
+    m_errorMessage.clear();
+    emit statusChanged();
+    return commitSegmentation(
+        thresholdSegmentation(snapshot, lower, upper), revision,
+        QStringLiteral("阈值分割完成：%1 至 %2 HU").arg(lower).arg(upper));
+}
 
-    try {
-        using Filter = itk::BinaryThresholdImageFilter<Image3D, MaskImage>;
-        auto filter = Filter::New();
-        filter->SetInput(itkImageFromSnapshot(*snapshot));
-        filter->SetLowerThreshold(static_cast<short>(std::clamp(lower, -32768.0, 32767.0)));
-        filter->SetUpperThreshold(static_cast<short>(std::clamp(upper, -32768.0, 32767.0)));
-        filter->SetInsideValue(1);
-        filter->SetOutsideValue(0);
-        filter->Update();
-
-        {
-            std::lock_guard<std::mutex> guard(m_snapshotMutex);
-            m_mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot);
-        }
-        updateActiveVolumeNode();
-        ++m_segmentationRevision;
-        m_statusMessage = QStringLiteral("阈值分割完成：%1 至 %2 HU").arg(lower).arg(upper);
-        m_errorMessage.clear();
-        emit segmentationChanged();
-        emit statusChanged();
-        return true;
-    } catch (const itk::ExceptionObject &error) {
-        setError(QStringLiteral("阈值分割失败：%1").arg(QString::fromUtf8(error.GetDescription())));
-        return false;
+void MedicalDataController::applyThresholdAsync(double lower, double upper)
+{
+    if (m_busy)
+        return;
+    const auto snapshot = volumeSnapshot();
+    if (!snapshot || snapshot->dimensions[2] <= 1 || lower > upper) {
+        setError(QStringLiteral("阈值分割参数无效或尚未载入 CT 体数据。"));
+        return;
     }
+
+    const int revision = m_datasetRevision;
+    const QString success = QStringLiteral("阈值分割完成：%1 至 %2 HU")
+                                .arg(lower).arg(upper);
+    setBusy(true);
+    m_statusMessage = QStringLiteral("正在后台执行阈值分割…");
+    m_errorMessage.clear();
+    emit statusChanged();
+
+    auto *watcher = new QFutureWatcher<SegmentationResult>(this);
+    connect(watcher, &QFutureWatcher<SegmentationResult>::finished, this,
+            [this, watcher, revision, success] {
+        auto result = watcher->result();
+        watcher->deleteLater();
+        commitSegmentation(std::move(result), revision, success);
+    });
+    watcher->setFuture(QtConcurrent::run(
+        [snapshot, lower, upper] { return thresholdSegmentation(snapshot, lower, upper); }));
 }
 
 bool MedicalDataController::setRegionGrowingSeed(int seedX, int seedY, int seedZ)
@@ -1136,7 +1339,10 @@ void MedicalDataController::clearRegionGrowingSeed()
     m_regionGrowingSeed = {-1, -1, -1};
     m_regionGrowingSeedValue = 0;
     m_regionGrowingSeedValid = false;
+    m_errorMessage.clear();
+    m_statusMessage = QStringLiteral("种子点已清除");
     emit regionGrowingSeedChanged();
+    emit statusChanged();
 }
 
 bool MedicalDataController::applyRegionGrowingFromSeed(double lower, double upper)
@@ -1145,15 +1351,70 @@ bool MedicalDataController::applyRegionGrowingFromSeed(double lower, double uppe
         setError(QStringLiteral("请先在轴状位、冠状位或矢状位切片中选择种子点。"));
         return false;
     }
+    if (!std::isfinite(lower) || !std::isfinite(upper) || lower > upper) {
+        setError(QStringLiteral("种子生长的 HU 范围无效。"));
+        return false;
+    }
     return applyRegionGrowing(m_regionGrowingSeed[0], m_regionGrowingSeed[1],
                               m_regionGrowingSeed[2], lower, upper);
 }
 
+void MedicalDataController::applyRegionGrowingFromSeedAsync(
+    double lower, double upper, bool fullyConnected)
+{
+    if (m_busy)
+        return;
+    if (!m_regionGrowingSeedValid) {
+        setError(QStringLiteral("请先在轴状位、冠状位或矢状位切片中选择种子点。"));
+        return;
+    }
+
+    const auto snapshot = volumeSnapshot();
+    const int seedX = m_regionGrowingSeed[0];
+    const int seedY = m_regionGrowingSeed[1];
+    const int seedZ = m_regionGrowingSeed[2];
+    if (!snapshot || !std::isfinite(lower) || !std::isfinite(upper) || lower > upper) {
+        setError(QStringLiteral("种子生长的 HU 范围无效。"));
+        return;
+    }
+    const auto seedOffset = static_cast<std::size_t>(
+        (seedZ * snapshot->dimensions[1] + seedY) * snapshot->dimensions[0] + seedX);
+    const short seedValue = snapshot->pixels[seedOffset];
+    if (seedValue < lower || seedValue > upper) {
+        setError(QStringLiteral("种子点为 %1 HU，不在 %2 至 %3 HU 的生长范围内。")
+                     .arg(seedValue).arg(lower).arg(upper));
+        return;
+    }
+
+    const int revision = m_datasetRevision;
+    const QString success = QStringLiteral("种子生长完成：IJK (%1, %2, %3)")
+                                .arg(seedX).arg(seedY).arg(seedZ);
+    setBusy(true);
+    m_statusMessage = QStringLiteral("正在后台执行种子生长…");
+    m_errorMessage.clear();
+    emit statusChanged();
+
+    auto *watcher = new QFutureWatcher<SegmentationResult>(this);
+    connect(watcher, &QFutureWatcher<SegmentationResult>::finished, this,
+            [this, watcher, revision, success] {
+        auto result = watcher->result();
+        watcher->deleteLater();
+        commitSegmentation(std::move(result), revision, success);
+    });
+    watcher->setFuture(QtConcurrent::run(
+        [snapshot, seedX, seedY, seedZ, lower, upper, fullyConnected] {
+            return regionGrowingSegmentation(snapshot, seedX, seedY, seedZ,
+                                             lower, upper, fullyConnected);
+        }));
+}
+
 bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
-                                               double lower, double upper)
+                                               double lower, double upper,
+                                               bool fullyConnected)
 {
     const auto snapshot = volumeSnapshot();
-    if (!snapshot || lower > upper || seedX < 0 || seedY < 0 || seedZ < 0
+    if (!snapshot || !std::isfinite(lower) || !std::isfinite(upper) || lower > upper
+        || seedX < 0 || seedY < 0 || seedZ < 0
         || seedX >= snapshot->dimensions[0] || seedY >= snapshot->dimensions[1]
         || seedZ >= snapshot->dimensions[2]) {
         setError(QStringLiteral("区域生长的种子点或阈值范围无效。"));
@@ -1169,44 +1430,50 @@ bool MedicalDataController::applyRegionGrowing(int seedX, int seedY, int seedZ,
         return false;
     }
 
-    try {
-        using Filter = itk::ConnectedThresholdImageFilter<Image3D, MaskImage>;
-        auto filter = Filter::New();
-        filter->SetInput(itkImageFromSnapshot(*snapshot));
-        filter->SetLower(static_cast<short>(std::clamp(lower, -32768.0, 32767.0)));
-        filter->SetUpper(static_cast<short>(std::clamp(upper, -32768.0, 32767.0)));
-        filter->SetReplaceValue(1);
-        Image3D::IndexType seed;
-        seed[0] = seedX;
-        seed[1] = seedY;
-        seed[2] = seedZ;
-        filter->SetSeed(seed);
-        filter->Update();
+    const int revision = m_datasetRevision;
+    setBusy(true);
+    m_statusMessage = QStringLiteral("正在执行种子生长…");
+    m_errorMessage.clear();
+    emit statusChanged();
+    return commitSegmentation(
+        regionGrowingSegmentation(snapshot, seedX, seedY, seedZ,
+                                  lower, upper, fullyConnected),
+        revision, QStringLiteral("种子生长完成：IJK (%1, %2, %3)")
+                      .arg(seedX).arg(seedY).arg(seedZ));
+}
 
-        auto mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot);
-        const auto selectedCount = static_cast<qsizetype>(std::count_if(
-            mask->pixels.cbegin(), mask->pixels.cend(),
-            [](unsigned char value) { return value != 0; }));
-        if (selectedCount <= 0) {
-            setError(QStringLiteral("种子生长没有产生有效区域，请重新选择种子点或调整 HU 范围。"));
-            return false;
-        }
-        {
-            std::lock_guard<std::mutex> guard(m_snapshotMutex);
-            m_mask = std::move(mask);
-        }
-        updateActiveVolumeNode();
-        ++m_segmentationRevision;
-        m_statusMessage = QStringLiteral("种子生长完成：IJK (%1, %2, %3)，%4 个体素")
-                              .arg(seedX).arg(seedY).arg(seedZ).arg(selectedCount);
-        m_errorMessage.clear();
-        emit segmentationChanged();
-        emit statusChanged();
-        return true;
-    } catch (const itk::ExceptionObject &error) {
-        setError(QStringLiteral("种子生长失败：%1").arg(QString::fromUtf8(error.GetDescription())));
+bool MedicalDataController::commitSegmentation(
+    SegmentationResult result, int expectedDatasetRevision, const QString &successMessage)
+{
+    if (expectedDatasetRevision != m_datasetRevision) {
+        setBusy(false);
+        setError(QStringLiteral("数据集已切换，本次分割结果已丢弃。"));
         return false;
     }
+    if (!result.error.isEmpty()) {
+        setBusy(false);
+        setError(result.error);
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(m_snapshotMutex);
+        m_mask = std::move(result.mask);
+    }
+    m_segmentationMethod = std::move(result.method);
+    m_segmentationVoxelCount = result.selectedVoxelCount;
+    m_segmentationVolumeMl = result.selectedVolumeMl;
+    updateActiveVolumeNode();
+    ++m_segmentationRevision;
+    m_statusMessage = QStringLiteral("%1，%2 个体素，约 %3 mL")
+                          .arg(successMessage)
+                          .arg(m_segmentationVoxelCount)
+                          .arg(m_segmentationVolumeMl, 0, 'f', 2);
+    m_errorMessage.clear();
+    emit segmentationChanged();
+    emit statusChanged();
+    setBusy(false);
+    return true;
 }
 
 void MedicalDataController::clearSegmentation()
@@ -1215,6 +1482,9 @@ void MedicalDataController::clearSegmentation()
         std::lock_guard<std::mutex> guard(m_snapshotMutex);
         m_mask.reset();
     }
+    m_segmentationMethod.clear();
+    m_segmentationVoxelCount = 0;
+    m_segmentationVolumeMl = 0.0;
     updateActiveVolumeNode();
     ++m_segmentationRevision;
     m_statusMessage = QStringLiteral("分割结果已清除");
@@ -1311,6 +1581,8 @@ void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapsh
     node->projectionPairImageType = m_projectionPairImageType;
     node->projectionPairSopClassName = m_projectionPairSopClassName;
     node->projectionUnsigned = m_projectionUnsigned;
+    node->projectionInverted = m_projectionInverted;
+    node->projectionPairInverted = m_projectionPairInverted;
     node->sourcePath = m_sourcePath;
     node->sourceFiles = sourceFiles;
     node->pairSourceFiles = pairSourceFiles;
@@ -1351,6 +1623,11 @@ void MedicalDataController::updateActiveVolumeNode()
     }
     node->windowWidth = m_windowWidth;
     node->windowLevel = m_windowLevel;
+    node->projectionInverted = m_projectionInverted;
+    node->projectionPairInverted = m_projectionPairInverted;
+    node->segmentationMethod = m_segmentationMethod;
+    node->segmentationVoxelCount = m_segmentationVoxelCount;
+    node->segmentationVolumeMl = m_segmentationVolumeMl;
 }
 
 void MedicalDataController::activateVolumeNode(int index)
@@ -1384,9 +1661,14 @@ void MedicalDataController::activateVolumeNode(int index)
     m_projectionPairImageType = node->projectionPairImageType;
     m_projectionPairSopClassName = node->projectionPairSopClassName;
     m_projectionUnsigned = node->projectionUnsigned;
+    m_projectionInverted = node->projectionInverted;
+    m_projectionPairInverted = node->projectionPairInverted;
     m_sourcePath = node->sourcePath;
     m_windowWidth = node->windowWidth;
     m_windowLevel = node->windowLevel;
+    m_segmentationMethod = node->segmentationMethod;
+    m_segmentationVoxelCount = node->segmentationVoxelCount;
+    m_segmentationVolumeMl = node->segmentationVolumeMl;
     ++m_datasetRevision;
     ++m_segmentationRevision;
     m_regionGrowingSeed = {-1, -1, -1};
@@ -1414,6 +1696,9 @@ void MedicalDataController::clearActiveVolume()
     m_regionGrowingSeed = {-1, -1, -1};
     m_regionGrowingSeedValue = 0;
     m_regionGrowingSeedValid = false;
+    m_segmentationMethod.clear();
+    m_segmentationVoxelCount = 0;
+    m_segmentationVolumeMl = 0.0;
     emit dataChanged();
     emit segmentationChanged();
     emit regionGrowingSeedChanged();
@@ -1440,6 +1725,11 @@ void MedicalDataController::resetMetadata()
     m_projectionPairImageType.clear();
     m_projectionPairSopClassName.clear();
     m_projectionUnsigned = false;
+    m_projectionInverted = false;
+    m_projectionPairInverted = false;
     m_sourcePath.clear();
     m_sourceFiles.clear();
+    m_segmentationMethod.clear();
+    m_segmentationVoxelCount = 0;
+    m_segmentationVolumeMl = 0.0;
 }

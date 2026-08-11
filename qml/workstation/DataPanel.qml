@@ -36,9 +36,9 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             spacing: 6
-            ActionButton { text: "导入"; Layout.fillWidth: true; onClicked: root.requestFolderImport() }
-            ActionButton { text: "单文件"; Layout.fillWidth: true; onClicked: root.requestFileImport() }
-            ActionButton { text: "导出"; Layout.fillWidth: true; enabled: medicalData.loaded; onClicked: root.requestExport() }
+            ActionButton { text: "导入"; Layout.fillWidth: true; enabled: !medicalData.busy; onClicked: root.requestFolderImport() }
+            ActionButton { text: "单文件"; Layout.fillWidth: true; enabled: !medicalData.busy; onClicked: root.requestFileImport() }
+            ActionButton { text: "导出"; Layout.fillWidth: true; enabled: medicalData.loaded && !medicalData.busy; onClicked: root.requestExport() }
         }
 
         Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
@@ -65,6 +65,7 @@ Rectangle {
                     spacing: 6
                     CheckBox {
                         checked: modelData.visible
+                        enabled: !medicalData.busy
                         onClicked: medicalData.setVolumeVisibility(index, checked)
                     }
                     ColumnLayout {
@@ -101,6 +102,7 @@ Rectangle {
                 }
                 HoverHandler { id: nodeMouse }
                 TapHandler {
+                    enabled: !medicalData.busy
                     acceptedButtons: Qt.LeftButton
                     onTapped: medicalData.selectVolume(index)
                 }
@@ -120,7 +122,7 @@ Rectangle {
             ActionButton {
                 text: "重命名"
                 Layout.fillWidth: true
-                enabled: medicalData.selectedVolumeIndex >= 0
+                enabled: medicalData.selectedVolumeIndex >= 0 && !medicalData.busy
                 onClicked: {
                     renameField.text = medicalData.volumeNodes[medicalData.selectedVolumeIndex].name
                     renameRow.visible = true
@@ -131,7 +133,7 @@ Rectangle {
             ActionButton {
                 text: "移除"
                 Layout.fillWidth: true
-                enabled: medicalData.selectedVolumeIndex >= 0
+                enabled: medicalData.selectedVolumeIndex >= 0 && !medicalData.busy
                 onClicked: {
                     root.pendingRemoveVolume = medicalData.selectedVolumeIndex
                     removeDialog.open()
@@ -147,6 +149,7 @@ Rectangle {
                 id: renameField
                 Layout.fillWidth: true
                 selectByMouse: true
+                enabled: !medicalData.busy
                 onAccepted: {
                     if (medicalData.renameVolume(medicalData.selectedVolumeIndex, text))
                         renameRow.visible = false
@@ -154,6 +157,7 @@ Rectangle {
             }
             ActionButton {
                 text: "保存"
+                enabled: !medicalData.busy
                 onClicked: {
                     if (medicalData.renameVolume(medicalData.selectedVolumeIndex, renameField.text))
                         renameRow.visible = false
@@ -187,7 +191,7 @@ Rectangle {
                     spacing: 6
                     CheckBox {
                         checked: root.imageVisible
-                        enabled: medicalData.loaded
+                        enabled: medicalData.loaded && !medicalData.busy
                         onToggled: root.imageVisibilityRequested(checked)
                     }
                     Text { text: "原始影像"; color: Theme.text; Layout.fillWidth: true; font.pixelSize: 13 }
@@ -209,7 +213,7 @@ Rectangle {
                     spacing: 6
                     CheckBox {
                         checked: root.segmentationVisible
-                        enabled: medicalData.segmentationAvailable
+                        enabled: medicalData.segmentationAvailable && !medicalData.busy
                         onToggled: root.segmentationVisibilityRequested(checked)
                     }
                     Text { text: "分割结果"; color: Theme.text; Layout.fillWidth: true; font.pixelSize: 13 }
@@ -268,6 +272,7 @@ Rectangle {
     Dialog {
         id: removeDialog
         anchors.centerIn: parent
+        width: 360
         modal: true
         title: "从工作区移除 Volume"
         standardButtons: Dialog.Cancel | Dialog.Ok
@@ -277,7 +282,8 @@ Rectangle {
         }
         onRejected: root.pendingRemoveVolume = -1
         contentItem: Text {
-            width: 260
+            anchors.fill: parent
+            anchors.margins: 16
             text: "仅从当前工作区移除，不会删除原始 DICOM 文件。"
             color: Theme.text
             font.pixelSize: 13

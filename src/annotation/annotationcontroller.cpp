@@ -108,9 +108,15 @@ void AnnotationController::setVisible(bool visible)
 
 bool AnnotationController::addWorldPoint(double x, double y, double z)
 {
+    return addWorldPointForView(x, y, z, {});
+}
+
+bool AnnotationController::addWorldPointForView(double x, double y, double z,
+                                                const QString &viewId)
+{
     if (!m_scene.addWorldPoint(QVector3D(static_cast<float>(x),
                                          static_cast<float>(y),
-                                         static_cast<float>(z))))
+                                         static_cast<float>(z)), viewId))
         return false;
     emitSceneChanged();
     return true;
@@ -207,6 +213,8 @@ MarkupsScene *AnnotationController::sceneForId(const QString &volumeId) const
 {
     if (volumeId.isEmpty())
         return nullptr;
+    if (volumeId == m_activeVolumeId)
+        return const_cast<MarkupsScene *>(&m_scene);
     auto it = const_cast<std::map<QString, MarkupsScene> &>(m_scenes).find(volumeId);
     if (it == m_scenes.end())
         return nullptr;
@@ -253,7 +261,13 @@ void AnnotationController::rebindActiveScene()
     }
 
     if (activeId.isEmpty()) {
+        const MarkupsTool tool = m_scene.tool();
+        const bool visible = m_scene.visible();
+        m_scene = MarkupsScene {};
+        m_scene.setTool(tool);
+        m_scene.setVisible(visible);
         m_activeVolumeId.clear();
+        m_lastRevision = -1;
         return;
     }
 
@@ -265,6 +279,11 @@ void AnnotationController::rebindActiveScene()
         m_scenes[m_activeVolumeId] = m_scene;
 
     // 加载目标数据集的 scene（新数据集会默认构造为空 scene）。
+    const MarkupsTool tool = m_scene.tool();
+    const bool visible = m_scene.visible();
     m_scene = m_scenes[activeId];
+    m_scene.setTool(tool);
+    m_scene.setVisible(visible);
     m_activeVolumeId = activeId;
+    m_lastRevision = -1;
 }

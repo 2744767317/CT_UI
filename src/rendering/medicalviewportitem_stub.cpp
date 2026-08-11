@@ -10,12 +10,32 @@ MedicalViewportItem::MedicalViewportItem(QQuickItem *parent)
     setAntialiasing(true);
 }
 
+int MedicalViewportItem::sliceCount() const
+{
+    if (!m_volume || m_viewType == ViewType::Volume3D)
+        return 0;
+    int axisZ = 2;
+    if (m_viewType == ViewType::Coronal)
+        axisZ = 1;
+    else if (m_viewType == ViewType::Sagittal)
+        axisZ = 0;
+    return std::max(1, m_volume->dimensions[axisZ]);
+}
+
+void MedicalViewportItem::geometryChange(const QRectF &newGeometry,
+                                         const QRectF &oldGeometry)
+{
+    MedicalViewportBase::geometryChange(newGeometry, oldGeometry);
+    update();
+}
+
 void MedicalViewportItem::setViewType(ViewType type)
 {
     if (m_viewType == type)
         return;
     m_viewType = type;
     emit viewTypeChanged();
+    emit sliceCountChanged();
     update();
 }
 
@@ -175,9 +195,36 @@ bool MedicalViewportItem::mapClickToVoxel(double, double, bool)
     return false;
 }
 
+bool MedicalViewportItem::beginAnnotationInteraction(double, double, double)
+{
+    emit voxelPickFailed(QStringLiteral("MinGW UI 兼容模式不提供医学图像拾取。"));
+    return false;
+}
+
+bool MedicalViewportItem::updateAnnotationControlPoint(int, int, double, double)
+{
+    return false;
+}
+
 QVariantMap MedicalViewportItem::hitTestControlPoint(double, double, double)
 {
     return {};
+}
+
+void MedicalViewportItem::panBy(double, double)
+{
+}
+
+void MedicalViewportItem::zoomBy(double, double, double)
+{
+}
+
+void MedicalViewportItem::resetView()
+{
+    m_viewZoom = 1.0;
+    m_viewPanX = 0.0;
+    m_viewPanY = 0.0;
+    update();
 }
 
 void MedicalViewportItem::pickVoxel(double itemX, double itemY, bool updateSeed)
@@ -189,6 +236,7 @@ void MedicalViewportItem::reloadData()
 {
     m_volume = m_controller ? m_controller->volumeSnapshot() : nullptr;
     m_mask = m_controller ? m_controller->maskSnapshot() : nullptr;
+    emit sliceCountChanged();
     update();
 }
 

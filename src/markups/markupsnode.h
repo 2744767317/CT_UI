@@ -18,7 +18,10 @@ struct MarkupsNode {
     QString label;
     QString displayText;
     QString color = QStringLiteral("#E53935");
+    // Empty for CT/MPR world markups; projection markups are local to one X-ray view.
+    QString viewId;
     bool visible = true;
+    bool closed = false;
     double metric = 0.0;
     std::vector<QVector3D> controlPoints; // world mm
 };

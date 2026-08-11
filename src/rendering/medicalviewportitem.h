@@ -33,6 +33,7 @@ class MedicalViewportItem : public MedicalViewportBase
     Q_PROPERTY(double cropMinimum READ cropMinimum WRITE setCropMinimum NOTIFY cropChanged)
     Q_PROPERTY(double cropMaximum READ cropMaximum WRITE setCropMaximum NOTIFY cropChanged)
     Q_PROPERTY(bool showAnnotations READ showAnnotations WRITE setShowAnnotations NOTIFY showAnnotationsChanged)
+    Q_PROPERTY(int sliceCount READ sliceCount NOTIFY sliceCountChanged)
 
 public:
     enum class ViewType { Axial = 0, Coronal = 1, Sagittal = 2, Volume3D = 3 };
@@ -63,6 +64,7 @@ public:
     double cropMinimum() const { return m_cropMinimum; }
     double cropMaximum() const { return m_cropMaximum; }
     bool showAnnotations() const { return m_showAnnotations; }
+    int sliceCount() const;
 
     void setViewType(ViewType type);
     void setController(MedicalDataController *controller);
@@ -83,9 +85,16 @@ public:
     Q_INVOKABLE void pickVoxel(double itemX, double itemY, bool updateSeed = true);
     /// 按当前切片几何关系同步映射点击到体素（不依赖 VTK PropPicker）。
     Q_INVOKABLE bool mapClickToVoxel(double itemX, double itemY, bool updateSeed = false);
+    Q_INVOKABLE bool beginAnnotationInteraction(double itemX, double itemY,
+                                                double tolerancePx = 14.0);
+    Q_INVOKABLE bool updateAnnotationControlPoint(int nodeId, int pointIndex,
+                                                  double itemX, double itemY);
     /// 命中已提交标记的控制点；未命中返回空 map。
     Q_INVOKABLE QVariantMap hitTestControlPoint(double itemX, double itemY,
                                                 double tolerancePx = 14.0);
+    Q_INVOKABLE void panBy(double deltaX, double deltaY);
+    Q_INVOKABLE void zoomBy(double factor, double anchorX, double anchorY);
+    Q_INVOKABLE void resetView();
 
 signals:
     void viewTypeChanged();
@@ -101,17 +110,21 @@ signals:
     void orientationChanged();
     void cropChanged();
     void showAnnotationsChanged();
+    void sliceCountChanged();
     void voxelPicked(int voxelX, int voxelY, int voxelZ, int hu,
                      double normalizedX, double normalizedY);
     void voxelPickFailed(const QString &message);
+    void annotationControlPointPressed(int nodeId, int pointIndex);
 
 private slots:
     void reloadData();
     void updateRenderState();
     void syncAnnotationActors();
 
-#if CT_ENABLE_MEDICAL_BACKEND
 protected:
+    void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+
+#if CT_ENABLE_MEDICAL_BACKEND
     vtkUserData initializeVTK(vtkRenderWindow *renderWindow) override;
 #else
 public:
@@ -137,4 +150,7 @@ private:
     int m_rotationQuarterTurns = 0;
     bool m_flipHorizontal = false;
     bool m_flipVertical = false;
+    double m_viewZoom = 1.0;
+    double m_viewPanX = 0.0;
+    double m_viewPanY = 0.0;
 };

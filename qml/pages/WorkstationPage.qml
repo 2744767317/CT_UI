@@ -12,7 +12,7 @@ Item {
 
     property string toolMode: "浏览"
     property int toolModeIndex: 0
-    property int measureSubMode: AnnotationTool.LengthTool
+    property int measureSubMode: AnnotationTool.LineTool
     property int layoutMode: 0
     property bool mip: false
     property int volumePreset: MedicalViewport.BonePreset
@@ -24,20 +24,22 @@ Item {
     function measureToolLabel() {
         if (root.toolModeIndex !== 4)
             return "测量"
-        if (root.measureSubMode === AnnotationTool.MarkTool)
-            return "测量·标记"
+        if (root.measureSubMode === AnnotationTool.PointListTool)
+            return "测量·标点"
         if (root.measureSubMode === AnnotationTool.AngleTool)
             return "测量·角度"
-        if (root.measureSubMode === AnnotationTool.PerimeterTool)
-            return "测量·周长"
-        return "测量·长度"
+        if (root.measureSubMode === AnnotationTool.CurveTool)
+            return "测量·曲线"
+        return "测量·直线"
     }
 
     function selectMeasureTool(toolType) {
         root.toolMode = "测量"
         root.toolModeIndex = 4
         root.measureSubMode = toolType
+        root.showMeasurements = true
         annotationController.toolType = toolType
+        annotationController.visible = true
         root.seedPicking = false
     }
     property bool activePairedProjection: false
@@ -78,6 +80,15 @@ Item {
         function onDataChanged() {
             root.resetProjectionAdjustments()
             root.showImage = medicalData.activeVolumeVisible
+            root.seedPicking = false
+            root.seedViewType = -1
+            root.seedSlicePosition = -1.0
+        }
+        function onRegionGrowingSeedChanged() {
+            if (!medicalData.regionGrowingSeedValid) {
+                root.seedViewType = -1
+                root.seedSlicePosition = -1.0
+            }
         }
     }
 
@@ -133,27 +144,27 @@ Item {
                     ButtonGroup.group: toolGroup
                     onClicked: {
                         if (root.toolModeIndex !== 4)
-                            root.selectMeasureTool(root.measureSubMode || AnnotationTool.LengthTool)
+                            root.selectMeasureTool(root.measureSubMode || AnnotationTool.LineTool)
                         measureMenu.open()
                     }
                     Menu {
                         id: measureMenu
                         y: measureButton.height + 4
                         MenuItem {
-                            text: "标记"
-                            onTriggered: root.selectMeasureTool(AnnotationTool.MarkTool)
+                            text: "标点（Point List）"
+                            onTriggered: root.selectMeasureTool(AnnotationTool.PointListTool)
                         }
                         MenuItem {
-                            text: "角度"
+                            text: "直线（Line）"
+                            onTriggered: root.selectMeasureTool(AnnotationTool.LineTool)
+                        }
+                        MenuItem {
+                            text: "角度（Angle）"
                             onTriggered: root.selectMeasureTool(AnnotationTool.AngleTool)
                         }
                         MenuItem {
-                            text: "周长"
-                            onTriggered: root.selectMeasureTool(AnnotationTool.PerimeterTool)
-                        }
-                        MenuItem {
-                            text: "长度测量"
-                            onTriggered: root.selectMeasureTool(AnnotationTool.LengthTool)
+                            text: "曲线（Curve）"
+                            onTriggered: root.selectMeasureTool(AnnotationTool.CurveTool)
                         }
                     }
                 }

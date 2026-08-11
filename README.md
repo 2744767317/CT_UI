@@ -12,7 +12,8 @@
 - 加载 CT 三维序列，以及单幅或正侧位成对 X 线影像；
 - Axial、Coronal、Sagittal MPR 和 GPU 体绘制；
 - 窗宽窗位、缩放、平移、切片浏览、旋转、翻转和近似物理长度测量；
-- ITK 二值阈值分割和 Connected Threshold 种子生长；
+- 后台完成目录扫描、DICOM 像素解码、阈值分割和种子生长，避免阻塞 GUI；
+- ITK 二值阈值分割和 Connected Threshold 种子生长，支持 6/26 邻域及体积统计；
 - 切片分割叠加、三维分割表面、MIP 和 Z 轴裁剪；
 - 多个 Volume 驻留、切换、重命名、显隐和移除；
 - 将当前数据的原始 DICOM 实例完整复制到指定目录。
@@ -39,7 +40,8 @@ CUDA     C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8
 
 ```powershell
 cmake --preset msvc-v143-debug --fresh
-cmake --build --preset msvc-v143-debug --parallel 4
+cmake --build --preset msvc-v143-debug --target CT_UI --parallel 4
+cmake --build --preset msvc-v143-debug --target CT_UI_core_tests --parallel 4
 ctest --preset msvc-v143-debug --output-on-failure
 ```
 
@@ -54,7 +56,8 @@ E:/A/CT_UI-build/msvc-v143-debug/artifacts/Debug/tests/CT_UI_core_tests.exe
 
 ```powershell
 cmake --preset mingw-ui-debug --fresh
-cmake --build --preset mingw-ui-debug --parallel 4
+cmake --build --preset mingw-ui-debug --target CT_UI --parallel 4
+cmake --build --preset mingw-ui-debug --target CT_UI_core_tests --parallel 4
 ctest --preset mingw-ui-debug --output-on-failure
 ```
 
@@ -64,6 +67,8 @@ ctest --preset mingw-ui-debug --output-on-failure
 2. 选择 `CT UI - MSVC v143 Debug (Recommended)` CMake Preset。
 3. 确认构建目录为 `E:/A/CT_UI-build/msvc-v143-debug`。
 4. 保持配置为 `Debug`，构建并运行 `CT_UI` 目标。
+
+普通开发只构建 `CT_UI`。测试目标标记为 `EXCLUDE_FROM_ALL`，需要测试时再单独构建 `CT_UI_core_tests`，避免每次修改 UI 都连带链接测试程序。Debug 默认关闭 QML AOT C++ 缓存生成，以减少 QML 修改后的编译量；发布构建可设置 `CT_UI_ENABLE_QML_CACHEGEN=ON`。
 
 如果项目改名或移动后出现 `CMakeCache.txt directory is different`，在 Qt Creator 中执行“构建 > 清除 CMake 配置”，或删除仓库外对应的旧构建目录，再重新配置。不要手工修改 `CMakeCache.txt`。
 
@@ -106,6 +111,7 @@ CT_UI.exe --dicom E:/path/to/dicom --workstation
 $env:CT_UI_TEST_DICOM_DIR = "E:/path/to/one/dicom/series"
 $env:CT_UI_TEST_LIDC_ROOT = "E:/A/LIDC-IDRI-0001"
 $env:CT_UI_TEST_XRAY_ROOT = "E:/A/X_TEST"
+cmake --build --preset msvc-v143-debug --target CT_UI_core_tests --parallel 4
 ctest --preset msvc-v143-debug --output-on-failure
 ```
 
@@ -144,6 +150,7 @@ CT_UI/
 
 - 中文注释用于解释架构约束、线程边界、医学坐标和“为什么这样做”，不逐行翻译代码。
 - QML 不直接持有 DICOM 像素、ITK Image 或 VTK 对象。
+- QML 只调用异步导入和分割接口；同步接口保留给命令行和自动化测试。
 - 新页面或 QML 组件必须加入 `cmake/SourceFiles.cmake` 的 `CT_UI_QML_FILES`。
 - 新测试只放在 `tests/`，测试数据通过环境变量从仓库外注入。
 - 新三方依赖统一在 `cmake/` 中声明，不在业务源文件或个人 Qt Creator 配置里硬编码。

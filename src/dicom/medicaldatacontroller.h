@@ -32,6 +32,8 @@ struct MaskSnapshot
 
 struct DicomSeriesCandidate;
 struct LoadedVolumeNode;
+struct SeriesLoadResult;
+struct SegmentationResult;
 
 // 医学数据与场景控制器：负责 DICOM 发现、Volume 节点、显示状态和 ITK 算法。
 // QML 不直接持有大块像素内存，只通过属性和只读快照访问当前激活节点。
@@ -43,6 +45,9 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(bool projectionData READ projectionData NOTIFY dataChanged)
     Q_PROPERTY(bool pairedProjectionAvailable READ pairedProjectionAvailable NOTIFY dataChanged)
     Q_PROPERTY(bool segmentationAvailable READ segmentationAvailable NOTIFY segmentationChanged)
+    Q_PROPERTY(QString segmentationMethod READ segmentationMethod NOTIFY segmentationChanged)
+    Q_PROPERTY(qint64 segmentationVoxelCount READ segmentationVoxelCount NOTIFY segmentationChanged)
+    Q_PROPERTY(double segmentationVolumeMl READ segmentationVolumeMl NOTIFY segmentationChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString patientName READ patientName NOTIFY dataChanged)
     Q_PROPERTY(QString patientId READ patientId NOTIFY dataChanged)
@@ -69,6 +74,8 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(double windowLevel READ windowLevel WRITE setWindowLevel NOTIFY windowingChanged)
     Q_PROPERTY(double displayWindowLevel READ displayWindowLevel NOTIFY windowingChanged)
     Q_PROPERTY(bool projectionUnsigned READ projectionUnsigned NOTIFY dataChanged)
+    Q_PROPERTY(bool projectionInverted READ projectionInverted NOTIFY dataChanged)
+    Q_PROPERTY(bool projectionPairInverted READ projectionPairInverted NOTIFY dataChanged)
     Q_PROPERTY(int datasetRevision READ datasetRevision NOTIFY dataChanged)
     Q_PROPERTY(int segmentationRevision READ segmentationRevision NOTIFY segmentationChanged)
     Q_PROPERTY(bool regionGrowingSeedValid READ regionGrowingSeedValid NOTIFY regionGrowingSeedChanged)
@@ -90,6 +97,9 @@ public:
     bool projectionData() const;
     bool pairedProjectionAvailable() const;
     bool segmentationAvailable() const;
+    QString segmentationMethod() const { return m_segmentationMethod; }
+    qint64 segmentationVoxelCount() const { return m_segmentationVoxelCount; }
+    double segmentationVolumeMl() const { return m_segmentationVolumeMl; }
     bool busy() const { return m_busy; }
     QString patientName() const { return m_patientName; }
     QString patientId() const { return m_patientId; }
@@ -116,6 +126,8 @@ public:
     double windowLevel() const { return m_windowLevel; }
     double displayWindowLevel() const;
     bool projectionUnsigned() const { return m_projectionUnsigned; }
+    bool projectionInverted() const { return m_projectionInverted; }
+    bool projectionPairInverted() const { return m_projectionPairInverted; }
     int datasetRevision() const { return m_datasetRevision; }
     int segmentationRevision() const { return m_segmentationRevision; }
     bool regionGrowingSeedValid() const { return m_regionGrowingSeedValid; }
@@ -136,6 +148,7 @@ public:
     Q_INVOKABLE bool importDicom(const QUrl &source);
     Q_INVOKABLE void importDicomAsync(const QUrl &source);
     Q_INVOKABLE bool selectSeries(int index);
+    Q_INVOKABLE void selectSeriesAsync(int index);
     Q_INVOKABLE bool selectVolume(int index);
     Q_INVOKABLE bool renameVolume(int index, const QString &name);
     /// 当前活动数据集的稳定 id（供标注按数据集绑定）。
@@ -145,11 +158,15 @@ public:
     Q_INVOKABLE bool exportDicomCopy(const QUrl &destination);
     Q_INVOKABLE void loadDemoVolume();
     Q_INVOKABLE bool applyThreshold(double lower, double upper);
+    Q_INVOKABLE void applyThresholdAsync(double lower, double upper);
     Q_INVOKABLE bool setRegionGrowingSeed(int seedX, int seedY, int seedZ);
     Q_INVOKABLE void clearRegionGrowingSeed();
     Q_INVOKABLE bool applyRegionGrowingFromSeed(double lower, double upper);
+    Q_INVOKABLE void applyRegionGrowingFromSeedAsync(double lower, double upper,
+                                                     bool fullyConnected);
     Q_INVOKABLE bool applyRegionGrowing(int seedX, int seedY, int seedZ,
-                                       double lower, double upper);
+                                       double lower, double upper,
+                                       bool fullyConnected = false);
     Q_INVOKABLE void clearSegmentation();
     Q_INVOKABLE double estimateDistanceMm(int viewType, double pixelDx, double pixelDy,
                                           double viewportWidth, double viewportHeight,
@@ -181,6 +198,9 @@ private:
     void publishSeriesCandidates(
         std::vector<std::shared_ptr<DicomSeriesCandidate>> candidates);
     bool loadSeriesCandidate(int index);
+    bool commitSeriesLoad(SeriesLoadResult result);
+    bool commitSegmentation(SegmentationResult result, int expectedDatasetRevision,
+                            const QString &successMessage);
     void activateVolumeNode(int index);
     void updateActiveVolumeNode();
     void clearActiveVolume();
@@ -214,6 +234,8 @@ private:
     QString m_projectionPairImageType;
     QString m_projectionPairSopClassName;
     bool m_projectionUnsigned = false;
+    bool m_projectionInverted = false;
+    bool m_projectionPairInverted = false;
     QString m_sourcePath;
     QString m_statusMessage;
     QString m_errorMessage;
@@ -221,6 +243,9 @@ private:
     double m_windowLevel = 40.0;
     int m_datasetRevision = 0;
     int m_segmentationRevision = 0;
+    QString m_segmentationMethod;
+    qint64 m_segmentationVoxelCount = 0;
+    double m_segmentationVolumeMl = 0.0;
     std::array<int, 3> m_regionGrowingSeed {-1, -1, -1};
     int m_regionGrowingSeedValue = 0;
     bool m_regionGrowingSeedValid = false;

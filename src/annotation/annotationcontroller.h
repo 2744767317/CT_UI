@@ -25,10 +25,13 @@ class AnnotationController final : public QObject
 public:
     enum ToolType {
         NoneTool = 0,
-        MarkTool = 1,
-        LengthTool = 2,
+        PointListTool = 1,
+        MarkTool = PointListTool,
+        LineTool = 2,
+        LengthTool = LineTool,
         AngleTool = 3,
-        PerimeterTool = 4
+        CurveTool = 4,
+        PerimeterTool = CurveTool
     };
     Q_ENUM(ToolType)
 
@@ -55,6 +58,7 @@ public:
 
     Q_INVOKABLE bool addControlPoint(int voxelX, int voxelY, int voxelZ);
     Q_INVOKABLE bool addWorldPoint(double x, double y, double z);
+    bool addWorldPointForView(double x, double y, double z, const QString &viewId);
     Q_INVOKABLE bool finishActive();
     Q_INVOKABLE void cancelActive();
     Q_INVOKABLE void clearAll();

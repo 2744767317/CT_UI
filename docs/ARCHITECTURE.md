@@ -109,6 +109,12 @@ GUI 线程
        |                         目录遍历、DICOM 候选发现
        |                         结果排队回 GUI 线程发布
        |
+       +-- selectSeriesAsync --> 后台像素解码任务
+       |                         ITK/GDCM 读取完整 CT 或 DX
+       |
+       +-- segmentation async -> 后台 ITK 算法任务
+       |                         阈值 / 6 或 26 邻域种子生长
+       |
        +-- immutable snapshot --> Qt Quick / VTK 渲染线程
                                   创建和更新 VTK 对象
 ```
@@ -117,9 +123,16 @@ GUI 线程
 - GUI 线程只更新 Qt 属性和只读快照引用；
 - VTK 对象只在 `QQuickVTKItem` 的渲染线程中创建和访问；
 - 后台扫描任务不能直接修改 QML 可见属性，应回到 GUI 线程发布结果；
+- DICOM 像素解码和 ITK `Update()` 不能在 GUI 线程执行；
 - `m_snapshotMutex` 只保护快照交换，不应用来包围耗时 DICOM/ITK 操作。
 
 这些规则用于避免渲染上下文冲突、悬空指针和界面长时间冻结。
+
+算法任务捕获 `std::shared_ptr<const VolumeSnapshot>`，ITK 只读导入其像素缓冲区，不再复制整套 CT。结果完成后会校验 `datasetRevision`；若运行期间数据集已切换，旧结果不会覆盖新 Volume。ITK 工作线程最多使用 8 个逻辑核心，并为 GUI/VTK 保留处理能力。
+
+VTK 图像数组同样只读引用 `VolumeSnapshot`/`MaskSnapshot`，每个 `ViewportPipeline` 显式持有对应 `shared_ptr`。四视图不再各自复制整套 CT；替换 VTK 图像后才释放旧快照，避免悬空像素指针。
+
+当前 ITKIOGDCM Debug DLL 会为 LIDC 私有标签逐切片输出重复 Warning。扫描和像素解码任务在受互斥保护的作用域内临时屏蔽 GDCM 的 `stderr` 噪声，ITK 异常仍捕获并通过 `errorMessage` 返回，作用域结束后立即恢复进程输出。
 
 ## 5. 医学坐标与显示状态
 

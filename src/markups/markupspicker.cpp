@@ -2,8 +2,186 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
+#include <limits>
+#include <QStringList>
 
 namespace MarkupsPicker {
+
+void viewCameraAxes(int viewType, double *right, double *up);
+
+namespace {
+
+int automaticProjectionQuarterTurns(const QString &orientation)
+{
+    const QStringList axes = orientation.split(QChar(u'\\'), Qt::SkipEmptyParts);
+    if (axes.size() < 2)
+        return 0;
+    const QString first = axes.at(0).trimmed().toUpper();
+    const QString second = axes.at(1).trimmed().toUpper();
+    if (second == QStringLiteral("F"))
+        return 0;
+    if (second == QStringLiteral("H"))
+        return 2;
+    if (first == QStringLiteral("H"))
+        return 1;
+    if (first == QStringLiteral("F"))
+        return 3;
+    return 0;
+}
+
+std::array<double, 3> applyPresentation(const ImagePresentation &presentation,
+                                        const std::array<double, 3> &physical)
+{
+    return {
+        presentation.linear[0] * physical[0]
+            + presentation.linear[1] * physical[1] + presentation.offset[0],
+        presentation.linear[2] * physical[0]
+            + presentation.linear[3] * physical[1] + presentation.offset[1],
+        physical[2]
+    };
+}
+
+std::array<double, 3> presentedPhysicalToWorld(const VolumeSnapshot &volume,
+                                                const ImagePresentation &presentation,
+                                                const std::array<double, 3> &physical)
+{
+    const auto presented = applyPresentation(presentation, physical);
+    std::array<double, 3> world {volume.origin[0], volume.origin[1], volume.origin[2]};
+    for (int row = 0; row < 3; ++row) {
+        world[static_cast<std::size_t>(row)] +=
+            volume.direction[row * 3 + 0] * presented[0]
+            + volume.direction[row * 3 + 1] * presented[1]
+            + volume.direction[row * 3 + 2] * presented[2];
+    }
+    return world;
+}
+
+struct SliceScreenGeometry
+{
+    int axisX = 0;
+    int axisY = 1;
+    int axisZ = 2;
+    double right[3] {1.0, 0.0, 0.0};
+    double up[3] {0.0, 1.0, 0.0};
+    double minimumRight = 0.0;
+    double maximumRight = 0.0;
+    double minimumUp = 0.0;
+    double maximumUp = 0.0;
+    double baseRight = 0.0;
+    double baseUp = 0.0;
+    double xRight = 0.0;
+    double xUp = 0.0;
+    double yRight = 0.0;
+    double yUp = 0.0;
+};
+
+double dot3(const std::array<double, 3> &point, const double *axis)
+{
+    return point[0] * axis[0] + point[1] * axis[1] + point[2] * axis[2];
+}
+
+SliceScreenGeometry sliceScreenGeometry(const VolumeSnapshot &volume, int viewType,
+                                        double slicePosition,
+                                        const ImagePresentation &presentation)
+{
+    SliceScreenGeometry geometry;
+    viewAxes(viewType, &geometry.axisX, &geometry.axisY, &geometry.axisZ);
+    viewCameraAxes(viewType, geometry.right, geometry.up);
+
+    const auto rawSize = slicePhysicalSize(volume, viewType);
+    const int sliceCount = std::max(1, volume.dimensions[geometry.axisZ]);
+    std::array<double, 3> basePhysical {0.0, 0.0, 0.0};
+    basePhysical[static_cast<std::size_t>(geometry.axisZ)] =
+        sliceIndexFromPosition(slicePosition, sliceCount) * volume.spacing[geometry.axisZ];
+
+    const auto baseWorld = presentedPhysicalToWorld(volume, presentation, basePhysical);
+    geometry.baseRight = dot3(baseWorld, geometry.right);
+    geometry.baseUp = dot3(baseWorld, geometry.up);
+
+    auto xPhysical = basePhysical;
+    xPhysical[static_cast<std::size_t>(geometry.axisX)] += 1.0;
+    const auto xWorld = presentedPhysicalToWorld(volume, presentation, xPhysical);
+    geometry.xRight = dot3(xWorld, geometry.right) - geometry.baseRight;
+    geometry.xUp = dot3(xWorld, geometry.up) - geometry.baseUp;
+
+    auto yPhysical = basePhysical;
+    yPhysical[static_cast<std::size_t>(geometry.axisY)] += 1.0;
+    const auto yWorld = presentedPhysicalToWorld(volume, presentation, yPhysical);
+    geometry.yRight = dot3(yWorld, geometry.right) - geometry.baseRight;
+    geometry.yUp = dot3(yWorld, geometry.up) - geometry.baseUp;
+
+    geometry.minimumRight = std::numeric_limits<double>::max();
+    geometry.maximumRight = std::numeric_limits<double>::lowest();
+    geometry.minimumUp = std::numeric_limits<double>::max();
+    geometry.maximumUp = std::numeric_limits<double>::lowest();
+    for (int corner = 0; corner < 4; ++corner) {
+        auto physical = basePhysical;
+        physical[static_cast<std::size_t>(geometry.axisX)] =
+            (corner & 1) ? rawSize[0] : 0.0;
+        physical[static_cast<std::size_t>(geometry.axisY)] =
+            (corner & 2) ? rawSize[1] : 0.0;
+        const auto world = presentedPhysicalToWorld(volume, presentation, physical);
+        const double right = dot3(world, geometry.right);
+        const double up = dot3(world, geometry.up);
+        geometry.minimumRight = std::min(geometry.minimumRight, right);
+        geometry.maximumRight = std::max(geometry.maximumRight, right);
+        geometry.minimumUp = std::min(geometry.minimumUp, up);
+        geometry.maximumUp = std::max(geometry.maximumUp, up);
+    }
+    return geometry;
+}
+
+} // namespace
+
+ImagePresentation imagePresentationFor(const VolumeSnapshot &volume, bool projection,
+                                       const QString &patientOrientation,
+                                       int rotationQuarterTurns,
+                                       bool flipHorizontal, bool flipVertical)
+{
+    ImagePresentation presentation;
+    if (!projection)
+        return presentation;
+
+    const double width = std::max(0, volume.dimensions[0] - 1) * volume.spacing[0];
+    const double height = std::max(0, volume.dimensions[1] - 1) * volume.spacing[1];
+    const double centerX = width * 0.5;
+    const double centerY = height * 0.5;
+    auto preMultiply = [&presentation](double a00, double a01, double a10, double a11,
+                                       double tx, double ty) {
+        const auto oldLinear = presentation.linear;
+        const auto oldOffset = presentation.offset;
+        presentation.linear = {
+            a00 * oldLinear[0] + a01 * oldLinear[2],
+            a00 * oldLinear[1] + a01 * oldLinear[3],
+            a10 * oldLinear[0] + a11 * oldLinear[2],
+            a10 * oldLinear[1] + a11 * oldLinear[3]
+        };
+        presentation.offset = {
+            a00 * oldOffset[0] + a01 * oldOffset[1] + tx,
+            a10 * oldOffset[0] + a11 * oldOffset[1] + ty
+        };
+    };
+    auto centered = [&](double a00, double a01, double a10, double a11) {
+        preMultiply(a00, a01, a10, a11,
+                    centerX - a00 * centerX - a01 * centerY,
+                    centerY - a10 * centerX - a11 * centerY);
+    };
+
+    centered(1.0, 0.0, 0.0, -1.0);
+    const int turns = ((automaticProjectionQuarterTurns(patientOrientation)
+                        + rotationQuarterTurns) % 4 + 4) % 4;
+    if (turns != 0) {
+        constexpr double halfPi = 1.5707963267948966;
+        const double angle = halfPi * turns;
+        centered(std::cos(angle), -std::sin(angle), std::sin(angle), std::cos(angle));
+    }
+    if (flipHorizontal)
+        centered(-1.0, 0.0, 0.0, 1.0);
+    if (flipVertical)
+        centered(1.0, 0.0, 0.0, -1.0);
+    return presentation;
+}
 
 void viewAxes(int viewType, int *axisX, int *axisY, int *axisZ)
 {
@@ -22,6 +200,29 @@ void viewAxes(int viewType, int *axisX, int *axisY, int *axisZ)
     }
 }
 
+std::array<double, 2> slicePhysicalSize(const VolumeSnapshot &volume, int viewType)
+{
+    int axisX = 0;
+    int axisY = 1;
+    int axisZ = 2;
+    viewAxes(viewType, &axisX, &axisY, &axisZ);
+    (void)axisZ;
+    const auto length = [&](int axis) {
+        const int intervals = std::max(0, volume.dimensions[axis] - 1);
+        return std::max(volume.spacing[axis],
+                        static_cast<double>(intervals) * volume.spacing[axis]);
+    };
+    return {length(axisX), length(axisY)};
+}
+
+std::array<double, 2> sliceViewPhysicalSize(const VolumeSnapshot &volume, int viewType,
+                                            const ImagePresentation &presentation)
+{
+    const auto geometry = sliceScreenGeometry(volume, viewType, 0.5, presentation);
+    return {std::max(1e-9, geometry.maximumRight - geometry.minimumRight),
+            std::max(1e-9, geometry.maximumUp - geometry.minimumUp)};
+}
+
 // 与 medicalviewportitem.cpp rebuildPipeline 的相机一致：轴向 +Z 观察/up +Y、
 // 冠状 -Y 观察/up +Z、矢状 +X 观察/up +Z。right/up 均为世界(渲染)坐标。
 // 统一 slicePosition→切片索引：用截断(floor)，与 configureSlice / 切片更新处的
@@ -31,7 +232,12 @@ void viewAxes(int viewType, int *axisX, int *axisY, int *axisZ)
 int sliceIndexFromPosition(double slicePosition, int sliceCount)
 {
     const int last = std::max(0, sliceCount - 1);
-    return std::clamp(static_cast<int>(slicePosition * last), 0, last);
+    // Slider/wheel navigation produces exact logical steps as index / last, but the
+    // floating-point product may land infinitesimally below the integer. Keep floor
+    // semantics while preventing an accidental jump to the preceding slice.
+    constexpr double stepEpsilon = 1e-9;
+    return std::clamp(static_cast<int>(std::floor(slicePosition * last + stepEpsilon)),
+                      0, last);
 }
 
 void viewCameraAxes(int viewType, double *right, double *up)
@@ -109,49 +315,52 @@ bool worldToVoxel(const VolumeSnapshot &volume, const QVector3D &world,
 
 bool mapClickToWorld(const VolumeSnapshot &volume, int viewType, double slicePosition,
                      double itemX, double itemY, double viewportWidth, double viewportHeight,
-                     QVector3D *worldOut, int *voxelOut)
+                     QVector3D *worldOut, int *voxelOut,
+                     const ImagePresentation &presentation)
 {
     if (!worldOut || viewportWidth <= 0.0 || viewportHeight <= 0.0)
         return false;
     if (volume.dimensions[0] <= 0 || volume.dimensions[1] <= 0 || volume.dimensions[2] <= 0)
         return false;
 
-    int axisX = 0;
-    int axisY = 1;
-    int axisZ = 2;
-    viewAxes(viewType, &axisX, &axisY, &axisZ);
-
-    const double dimX = static_cast<double>(volume.dimensions[axisX]);
-    const double dimY = static_cast<double>(volume.dimensions[axisY]);
-    const double scale = std::min(viewportWidth / dimX, viewportHeight / dimY);
+    const auto geometry = sliceScreenGeometry(volume, viewType, slicePosition, presentation);
+    const double physicalWidth = geometry.maximumRight - geometry.minimumRight;
+    const double physicalHeight = geometry.maximumUp - geometry.minimumUp;
+    const double scale = std::min(viewportWidth / physicalWidth,
+                                  viewportHeight / physicalHeight);
     if (scale <= 0.0)
         return false;
-    const double offsetX = (viewportWidth - dimX * scale) * 0.5;
-    const double offsetY = (viewportHeight - dimY * scale) * 0.5;
+    const double offsetX = (viewportWidth - physicalWidth * scale) * 0.5;
+    const double offsetY = (viewportHeight - physicalHeight * scale) * 0.5;
     if (itemX < offsetX || itemY < offsetY
-        || itemX > offsetX + dimX * scale || itemY > offsetY + dimY * scale)
+        || itemX > offsetX + physicalWidth * scale
+        || itemY > offsetY + physicalHeight * scale)
         return false;
 
-    const double u = (itemX - offsetX) / scale - 0.5;
-    const double vFromTop = (itemY - offsetY) / scale - 0.5;
-    const double v = dimY - 1.0 - vFromTop;
-
-    // 默认假设 +axisX 朝屏幕右、+axisY 朝屏幕上；当 direction 含轴翻转
-    // （如倒序存储的 DICOM 切片轴为负）时该假设失效，需按投影符号反转，
-    // 否则冠状/矢状视图的点击落点会上下/左右镜像错位。
-    double right[3];
-    double up[3];
-    viewCameraAxes(viewType, right, up);
-    const double uu = axisProjection(volume.direction, axisX, right) < 0.0
-        ? (dimX - 1.0 - u) : u;
-    const double vv = axisProjection(volume.direction, axisY, up) < 0.0
-        ? (dimY - 1.0 - v) : v;
+    const double targetRight = geometry.minimumRight + (itemX - offsetX) / scale;
+    const double targetUp = geometry.maximumUp - (itemY - offsetY) / scale;
+    const double deltaRight = targetRight - geometry.baseRight;
+    const double deltaUp = targetUp - geometry.baseUp;
+    const double determinant = geometry.xRight * geometry.yUp
+        - geometry.yRight * geometry.xUp;
+    if (std::abs(determinant) < 1e-9)
+        return false;
+    const double xPhysical = (deltaRight * geometry.yUp
+                              - geometry.yRight * deltaUp) / determinant;
+    const double yPhysical = (geometry.xRight * deltaUp
+                              - deltaRight * geometry.xUp) / determinant;
+    const double xIndex = volume.spacing[geometry.axisX] > 0.0
+        ? xPhysical / volume.spacing[geometry.axisX] : 0.0;
+    const double yIndex = volume.spacing[geometry.axisY] > 0.0
+        ? yPhysical / volume.spacing[geometry.axisY] : 0.0;
 
     std::array<int, 3> index {0, 0, 0};
-    index[axisX] = std::clamp(static_cast<int>(std::lround(uu)), 0, volume.dimensions[axisX] - 1);
-    index[axisY] = std::clamp(static_cast<int>(std::lround(vv)), 0, volume.dimensions[axisY] - 1);
-    const int sliceCount = std::max(1, volume.dimensions[axisZ]);
-    index[axisZ] = sliceIndexFromPosition(slicePosition, sliceCount);
+    index[geometry.axisX] = std::clamp(static_cast<int>(std::lround(xIndex)), 0,
+                                       volume.dimensions[geometry.axisX] - 1);
+    index[geometry.axisY] = std::clamp(static_cast<int>(std::lround(yIndex)), 0,
+                                       volume.dimensions[geometry.axisY] - 1);
+    const int sliceCount = std::max(1, volume.dimensions[geometry.axisZ]);
+    index[geometry.axisZ] = sliceIndexFromPosition(slicePosition, sliceCount);
 
     if (voxelOut) {
         voxelOut[0] = index[0];
@@ -180,6 +389,133 @@ int sliceDelta(const VolumeSnapshot &volume, int viewType, double slicePosition,
     return coords[axisZ] - current;
 }
 
+double signedSliceDistanceMm(const VolumeSnapshot &volume, int viewType,
+                             double slicePosition, const QVector3D &world)
+{
+    int axisX = 0;
+    int axisY = 1;
+    int axisZ = 2;
+    viewAxes(viewType, &axisX, &axisY, &axisZ);
+    (void)axisX;
+    (void)axisY;
+    const auto physical = worldToImagePhysical(volume, world);
+    const int sliceCount = std::max(1, volume.dimensions[axisZ]);
+    const int slice = sliceIndexFromPosition(slicePosition, sliceCount);
+    return physical[static_cast<std::size_t>(axisZ)]
+        - static_cast<double>(slice) * volume.spacing[axisZ];
+}
+
+double sliceSlabHalfThicknessMm(const VolumeSnapshot &volume, int viewType)
+{
+    int axisX = 0;
+    int axisY = 1;
+    int axisZ = 2;
+    viewAxes(viewType, &axisX, &axisY, &axisZ);
+    (void)axisX;
+    (void)axisY;
+    return std::max(0.0, volume.spacing[axisZ]) * 0.5;
+}
+
+bool isPointDisplayableOnSlice(const VolumeSnapshot &volume, int viewType,
+                               double slicePosition, const QVector3D &world)
+{
+    constexpr double epsilonMm = 1e-6;
+    return std::abs(signedSliceDistanceMm(volume, viewType, slicePosition, world))
+        <= sliceSlabHalfThicknessMm(volume, viewType) + epsilonMm;
+}
+
+bool segmentSlicePlaneIntersection(const VolumeSnapshot &volume, int viewType,
+                                   double slicePosition, const QVector3D &a,
+                                   const QVector3D &b, QVector3D *intersectionOut)
+{
+    if (!intersectionOut)
+        return false;
+    constexpr double epsilonMm = 1e-6;
+    const double da = signedSliceDistanceMm(volume, viewType, slicePosition, a);
+    const double db = signedSliceDistanceMm(volume, viewType, slicePosition, b);
+    if (std::abs(da) <= epsilonMm && std::abs(db) <= epsilonMm)
+        return false;
+    if ((da > epsilonMm && db > epsilonMm) || (da < -epsilonMm && db < -epsilonMm))
+        return false;
+    const double denominator = da - db;
+    if (std::abs(denominator) <= epsilonMm)
+        return false;
+    const double t = std::clamp(da / denominator, 0.0, 1.0);
+    *intersectionOut = a + static_cast<float>(t) * (b - a);
+    return true;
+}
+
+bool clipSegmentToSliceSlab(const VolumeSnapshot &volume, int viewType,
+                            double slicePosition, const QVector3D &a,
+                            const QVector3D &b, QVector3D *clippedA,
+                            QVector3D *clippedB)
+{
+    if (!clippedA || !clippedB)
+        return false;
+    constexpr double epsilonMm = 1e-6;
+    const double halfThickness = sliceSlabHalfThicknessMm(volume, viewType);
+    const double da = signedSliceDistanceMm(volume, viewType, slicePosition, a);
+    const double db = signedSliceDistanceMm(volume, viewType, slicePosition, b);
+    const double delta = db - da;
+
+    double begin = 0.0;
+    double end = 1.0;
+    if (std::abs(delta) <= epsilonMm) {
+        if (std::abs(da) > halfThickness + epsilonMm)
+            return false;
+    } else {
+        const double atNegativeBoundary = (-halfThickness - da) / delta;
+        const double atPositiveBoundary = (halfThickness - da) / delta;
+        begin = std::max(0.0, std::min(atNegativeBoundary, atPositiveBoundary));
+        end = std::min(1.0, std::max(atNegativeBoundary, atPositiveBoundary));
+        if (begin > end + epsilonMm)
+            return false;
+    }
+
+    const QVector3D direction = b - a;
+    *clippedA = a + static_cast<float>(begin) * direction;
+    *clippedB = a + static_cast<float>(end) * direction;
+    return true;
+}
+
+std::vector<std::vector<QVector3D>> clipPolylineToSliceSlab(
+    const VolumeSnapshot &volume, int viewType, double slicePosition,
+    const std::vector<QVector3D> &points, bool closed)
+{
+    std::vector<std::vector<QVector3D>> runs;
+    if (points.size() < 2)
+        return runs;
+
+    constexpr float joinToleranceSquared = 1e-8f;
+    const std::size_t segmentCount = closed ? points.size() : points.size() - 1;
+    for (std::size_t index = 0; index < segmentCount; ++index) {
+        QVector3D a;
+        QVector3D b;
+        if (!clipSegmentToSliceSlab(volume, viewType, slicePosition,
+                                    points[index], points[(index + 1) % points.size()],
+                                    &a, &b)) {
+            continue;
+        }
+        if (!runs.empty() && (runs.back().back() - a).lengthSquared()
+                <= joinToleranceSquared) {
+            if ((runs.back().back() - b).lengthSquared() > joinToleranceSquared)
+                runs.back().push_back(b);
+        } else {
+            runs.push_back({a, b});
+        }
+    }
+
+    if (closed && runs.size() > 1
+        && (runs.back().back() - runs.front().front()).lengthSquared()
+            <= joinToleranceSquared) {
+        std::vector<QVector3D> merged = std::move(runs.back());
+        runs.pop_back();
+        merged.insert(merged.end(), std::next(runs.front().begin()), runs.front().end());
+        runs.front() = std::move(merged);
+    }
+    return runs;
+}
+
 std::array<double, 3> worldToImagePhysical(const VolumeSnapshot &volume,
                                            const QVector3D &world)
 {
@@ -198,47 +534,49 @@ std::array<double, 3> worldToImagePhysical(const VolumeSnapshot &volume,
     return indexPhysical;
 }
 
-bool worldToDisplay(const VolumeSnapshot &volume, int viewType, double /*slicePosition*/,
-                    double viewportWidth, double viewportHeight, const QVector3D &world,
-                    double *displayX, double *displayY)
+std::array<double, 3> worldToSliceImagePhysical(const VolumeSnapshot &volume,
+                                                int viewType,
+                                                double slicePosition,
+                                                const QVector3D &world)
 {
-    if (!displayX || !displayY || viewportWidth <= 0.0 || viewportHeight <= 0.0)
-        return false;
-    int i = 0;
-    int j = 0;
-    int k = 0;
-    if (!worldToVoxel(volume, world, &i, &j, &k))
-        return false;
-
+    auto physical = worldToImagePhysical(volume, world);
     int axisX = 0;
     int axisY = 1;
     int axisZ = 2;
     viewAxes(viewType, &axisX, &axisY, &axisZ);
-    const int coords[3] = {i, j, k};
-    (void)axisZ;
+    (void)axisX;
+    (void)axisY;
 
-    const double dimX = static_cast<double>(volume.dimensions[axisX]);
-    const double dimY = static_cast<double>(volume.dimensions[axisY]);
-    const double scale = std::min(viewportWidth / dimX, viewportHeight / dimY);
+    const int sliceCount = std::max(1, volume.dimensions[axisZ]);
+    const int slice = sliceIndexFromPosition(slicePosition, sliceCount);
+    physical[static_cast<std::size_t>(axisZ)] =
+        static_cast<double>(slice) * volume.spacing[axisZ];
+    return physical;
+}
+
+bool worldToDisplay(const VolumeSnapshot &volume, int viewType, double slicePosition,
+                    double viewportWidth, double viewportHeight, const QVector3D &world,
+                    double *displayX, double *displayY,
+                    const ImagePresentation &presentation)
+{
+    if (!displayX || !displayY || viewportWidth <= 0.0 || viewportHeight <= 0.0)
+        return false;
+
+    const auto physical = worldToImagePhysical(volume, world);
+    const auto geometry = sliceScreenGeometry(volume, viewType, slicePosition, presentation);
+    const double physicalWidth = geometry.maximumRight - geometry.minimumRight;
+    const double physicalHeight = geometry.maximumUp - geometry.minimumUp;
+    const double scale = std::min(viewportWidth / physicalWidth,
+                                  viewportHeight / physicalHeight);
     if (scale <= 0.0)
         return false;
-    const double offsetX = (viewportWidth - dimX * scale) * 0.5;
-    const double offsetY = (viewportHeight - dimY * scale) * 0.5;
-
-    // 与 mapClickToWorld 互逆且方向感知：direction 含轴翻转时同样按投影符号反转，
-    // 使悬停/命中测试的屏幕投影与实际渲染一致。
-    double right[3];
-    double up[3];
-    viewCameraAxes(viewType, right, up);
-    const double u = axisProjection(volume.direction, axisX, right) < 0.0
-        ? (dimX - 1.0 - static_cast<double>(coords[axisX]))
-        : static_cast<double>(coords[axisX]);
-    const double v = axisProjection(volume.direction, axisY, up) < 0.0
-        ? (dimY - 1.0 - static_cast<double>(coords[axisY]))
-        : static_cast<double>(coords[axisY]);
-    const double vFromTop = dimY - 1.0 - v;
-    *displayX = offsetX + (u + 0.5) * scale;
-    *displayY = offsetY + (vFromTop + 0.5) * scale;
+    const double offsetX = (viewportWidth - physicalWidth * scale) * 0.5;
+    const double offsetY = (viewportHeight - physicalHeight * scale) * 0.5;
+    const auto presentedWorld = presentedPhysicalToWorld(volume, presentation, physical);
+    const double right = dot3(presentedWorld, geometry.right);
+    const double up = dot3(presentedWorld, geometry.up);
+    *displayX = offsetX + (right - geometry.minimumRight) * scale;
+    *displayY = offsetY + (geometry.maximumUp - up) * scale;
     return true;
 }
 

@@ -78,14 +78,15 @@ Item {
                             RowLayout {
                                 Layout.alignment: Qt.AlignHCenter
                                 spacing: 8
-                                ActionButton { text: "导入 DICOM 目录"; onClicked: root.requestFolderImport() }
-                                ActionButton { text: "导入单个文件"; onClicked: root.requestFileImport() }
+                                ActionButton { text: "导入 DICOM 目录"; enabled: !medicalData.busy; onClicked: root.requestFolderImport() }
+                                ActionButton { text: "导入单个文件"; enabled: !medicalData.busy; onClicked: root.requestFileImport() }
                                 ActionButton {
                                     text: "选择已发现序列"
                                     visible: medicalData.seriesChoices.length > 1
+                                    enabled: !medicalData.busy
                                     onClicked: root.requestSeriesSelection()
                                 }
-                                ActionButton { text: "载入演示 CT"; onClicked: root.requestDemo() }
+                                ActionButton { text: "载入演示 CT"; enabled: !medicalData.busy; onClicked: root.requestDemo() }
                             }
                             Text {
                                 visible: !medicalBackendEnabled

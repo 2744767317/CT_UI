@@ -39,7 +39,7 @@ void refreshMarkupsMetrics(MarkupsNode *node)
         }
         break;
     case MarkupsNodeType::ClosedCurve:
-        node->metric = MarkupsMetrics::perimeterMm(node->controlPoints, true);
+        node->metric = MarkupsMetrics::curveLengthMm(node->controlPoints, node->closed);
         node->displayText = QStringLiteral("%1: %2mm")
                                 .arg(node->label)
                                 .arg(node->metric, 0, 'f', 2);

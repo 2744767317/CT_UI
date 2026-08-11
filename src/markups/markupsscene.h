@@ -40,7 +40,7 @@ public:
     QVariantList activePointsVariant() const;
     QVariantList renderItemsVariant() const;
 
-    bool addWorldPoint(const QVector3D &world);
+    bool addWorldPoint(const QVector3D &world, const QString &viewId = {});
     bool finishActive();
     void cancelActive();
     void clearAll();

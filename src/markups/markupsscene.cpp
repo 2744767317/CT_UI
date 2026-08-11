@@ -21,7 +21,9 @@ QVariantMap nodeVariant(const MarkupsNode &node)
     map.insert(QStringLiteral("label"), node.label);
     map.insert(QStringLiteral("displayText"), node.displayText);
     map.insert(QStringLiteral("color"), node.color);
+    map.insert(QStringLiteral("viewId"), node.viewId);
     map.insert(QStringLiteral("visible"), node.visible);
+    map.insert(QStringLiteral("closed"), node.closed);
     map.insert(QStringLiteral("metric"), node.metric);
     QVariantList points;
     for (const QVector3D &point : node.controlPoints)
@@ -70,8 +72,15 @@ void MarkupsScene::setTool(MarkupsTool tool)
 {
     if (m_tool == tool)
         return;
-    if (m_active)
-        cancelActive();
+    if (m_active) {
+        const bool persistentList = m_active->type == MarkupsNodeType::Point;
+        const bool curve = m_active->type == MarkupsNodeType::ClosedCurve;
+        const std::size_t minimumPoints = persistentList ? 1u : 2u;
+        if ((persistentList || curve) && m_active->controlPoints.size() >= minimumPoints)
+            finishActive();
+        else
+            cancelActive();
+    }
     m_tool = tool;
     bump();
 }
@@ -159,7 +168,8 @@ bool MarkupsScene::tryCommitActive()
     if (!m_active)
         return false;
     const int need = requiredPoints(m_active->type);
-    if (m_active->type == MarkupsNodeType::ClosedCurve)
+    if (m_active->type == MarkupsNodeType::Point
+        || m_active->type == MarkupsNodeType::ClosedCurve)
         return false;
     if (static_cast<int>(m_active->controlPoints.size()) < need)
         return false;
@@ -169,7 +179,7 @@ bool MarkupsScene::tryCommitActive()
     return true;
 }
 
-bool MarkupsScene::addWorldPoint(const QVector3D &world)
+bool MarkupsScene::addWorldPoint(const QVector3D &world, const QString &viewId)
 {
     if (m_tool == MarkupsTool::None)
         return false;
@@ -180,13 +190,19 @@ bool MarkupsScene::addWorldPoint(const QVector3D &world)
         node.type = typeForTool(m_tool);
         node.label = nextLabel(node.type);
         node.color = QStringLiteral("#E53935");
+        node.viewId = viewId;
         m_active = node;
+    } else if (m_active->viewId != viewId) {
+        // A projection markup belongs to the view where its first point was placed.
+        // Do not reinterpret its next control point in the paired projection.
+        return false;
     }
 
     m_active->controlPoints.push_back(world);
     refreshMarkupsMetrics(&(*m_active));
 
-    if (m_active->type == MarkupsNodeType::ClosedCurve) {
+    if (m_active->type == MarkupsNodeType::Point
+        || m_active->type == MarkupsNodeType::ClosedCurve) {
         bump();
         return true;
     }
@@ -200,9 +216,20 @@ bool MarkupsScene::addWorldPoint(const QVector3D &world)
 
 bool MarkupsScene::finishActive()
 {
-    if (!m_active || m_active->type != MarkupsNodeType::ClosedCurve
-        || m_active->controlPoints.size() < 3)
+    if (!m_active)
         return false;
+    auto &points = m_active->controlPoints;
+    if (m_active->type == MarkupsNodeType::Point) {
+        if (points.empty())
+            return false;
+    } else if (m_active->type == MarkupsNodeType::ClosedCurve) {
+        if (points.size() < 2)
+            return false;
+        // Slicer's Curve markup is open by default. Closing is a separate display/node option.
+        m_active->closed = false;
+    } else {
+        return false;
+    }
     refreshMarkupsMetrics(&(*m_active));
     m_nodes.push_back(*m_active);
     m_active.reset();
@@ -266,7 +293,7 @@ bool MarkupsScene::removeNode(int nodeId)
 
 int MarkupsScene::markCount() const
 {
-    int count = 0;
+    int count = (m_active && m_active->type == MarkupsNodeType::Point) ? 1 : 0;
     for (const MarkupsNode &node : m_nodes)
         if (node.type == MarkupsNodeType::Point)
             ++count;

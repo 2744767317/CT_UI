@@ -26,10 +26,13 @@ Rectangle {
     property bool activeViewport: false
     property real seedMarkerX: 0.5
     property real seedMarkerY: 0.5
+    property bool seedPickPending: false
+    property string seedPickMessage: ""
+    property bool seedPickMessageError: false
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
     property real slicePosition: sliceSlider.value
-    property bool annotationPicking: false
+    readonly property int sliceCount: viewport.sliceCount
     property bool draggingHandle: false
     property int dragNodeId: -1
     property int dragPointIndex: -1
@@ -42,12 +45,58 @@ Rectangle {
     // 与窗宽窗位对称：用 toolModeIndex 直接打开 MouseArea，避免 measureMode 复合条件导致测量时 enabled=false
     readonly property bool captureInput: root.seedPicking
             || root.toolModeIndex === 1
+            || root.toolModeIndex === 2
+            || root.toolModeIndex === 3
             || root.toolModeIndex === 4
+
+    function stepSlice(direction) {
+        if (root.sliceCount <= 1 || direction === 0)
+            return
+        const last = root.sliceCount - 1
+        const current = Math.round(sliceSlider.value * last)
+        const next = Math.max(0, Math.min(last, current + direction))
+        sliceSlider.value = next / last
+    }
+
+    function handleWheel(wheel) {
+        const local = root.mapToItem(viewport, wheel.x, wheel.y)
+        const delta = wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.pixelDelta.y
+        if ((wheel.modifiers & Qt.ControlModifier) && delta !== 0) {
+            viewport.zoomBy(Math.pow(1.12, delta / 120.0), local.x, local.y)
+        } else {
+            root.stepSlice(delta > 0 ? 1 : -1)
+        }
+        wheel.accepted = true
+    }
+
+    function handleZoomShortcut(key) {
+        if (key === Qt.Key_0) {
+            viewport.resetView()
+            return true
+        }
+        if (key === Qt.Key_Plus || key === Qt.Key_Equal) {
+            viewport.zoomBy(1.2, viewport.width * 0.5, viewport.height * 0.5)
+            return true
+        }
+        if (key === Qt.Key_Minus || key === Qt.Key_Underscore) {
+            viewport.zoomBy(1.0 / 1.2, viewport.width * 0.5, viewport.height * 0.5)
+            return true
+        }
+        return false
+    }
 
     color: Theme.image
     border.width: 1
     border.color: root.activeViewport || activeArea.containsMouse ? root.viewColor : Theme.border
     clip: true
+    focus: false
+
+    Keys.onPressed: event => {
+        if (!(event.modifiers & Qt.ControlModifier))
+            return
+        if (root.handleZoomShortcut(event.key))
+            event.accepted = true
+    }
 
     onShowMeasurementsChanged: viewport.showAnnotations = root.showMeasurements
     Component.onCompleted: {
@@ -80,19 +129,26 @@ Rectangle {
                             root.dragNodeId, root.dragPointIndex, voxelX, voxelY, voxelZ)
                 return
             }
-            if (root.annotationPicking) {
-                root.annotationPicking = false
-                annotationController.addControlPoint(voxelX, voxelY, voxelZ)
-                return
-            }
+            pickTimeout.stop()
+            root.seedPickPending = false
+            root.seedPickMessageError = false
+            root.seedPickMessage = "种子点已选择：IJK (" + voxelX + ", " + voxelY + ", "
+                    + voxelZ + ")，" + hu + " HU"
+            pickMessageTimer.restart()
             root.seedSelected(root.viewType, normalizedX, normalizedY, root.slicePosition)
         }
         onVoxelPickFailed: message => {
-            root.annotationPicking = false
             root.draggingHandle = false
-            pickError.text = message
-            pickError.visible = true
-            pickErrorTimer.restart()
+            pickTimeout.stop()
+            root.seedPickPending = false
+            root.seedPickMessageError = true
+            root.seedPickMessage = message
+            pickMessageTimer.restart()
+        }
+        onAnnotationControlPointPressed: (nodeId, pointIndex) => {
+            root.dragNodeId = nodeId
+            root.dragPointIndex = pointIndex
+            root.draggingHandle = activeArea.pressed
         }
     }
 
@@ -128,13 +184,17 @@ Rectangle {
     MouseArea {
         anchors.fill: parent
         z: 7
-        enabled: medicalData.projectionData && !root.seedPicking
-                 && root.toolModeIndex !== 1 && !root.measureMode
-        acceptedButtons: Qt.LeftButton
-        propagateComposedEvents: true
+        enabled: medicalData.loaded && !root.seedPicking
+                 && root.viewType !== MedicalViewport.Volume3D && !root.captureInput
+        acceptedButtons: Qt.AllButtons
+        preventStealing: true
         onPressed: mouse => {
             root.activated()
-            mouse.accepted = false
+            root.forceActiveFocus()
+            mouse.accepted = true
+        }
+        onWheel: wheel => {
+            root.handleWheel(wheel)
         }
     }
 
@@ -168,23 +228,35 @@ Rectangle {
         anchors.fill: parent
         z: 10
         hoverEnabled: true
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
-        enabled: root.viewType !== MedicalViewport.Volume3D && root.captureInput
+        acceptedButtons: Qt.AllButtons
+        enabled: root.viewType !== MedicalViewport.Volume3D
+                 && !root.seedPickPending
+                 && root.captureInput
         preventStealing: true
         cursorShape: root.seedPicking || root.toolModeIndex === 4
-                     ? Qt.CrossCursor : Qt.SizeAllCursor
+                     ? Qt.CrossCursor
+                     : (root.toolModeIndex === 3 ? Qt.SizeVerCursor : Qt.SizeAllCursor)
 
         onPressed: mouse => {
             root.activated()
+            root.forceActiveFocus()
             if (mouse.button === Qt.RightButton) {
                 if (root.toolModeIndex === 4
-                        && annotationController.toolType === AnnotationTool.PerimeterTool) {
+                        && (annotationController.toolType === AnnotationTool.CurveTool
+                            || annotationController.toolType === AnnotationTool.PointListTool)) {
                     annotationController.finishActive()
                 }
                 return
             }
+            if (mouse.button !== Qt.LeftButton)
+                return
             if (root.seedPicking) {
                 const seedLocal = mapToItem(viewport, mouse.x, mouse.y)
+                root.seedPickPending = true
+                root.seedPickMessageError = false
+                root.seedPickMessage = "正在读取种子点…"
+                pickMessageTimer.stop()
+                pickTimeout.restart()
                 viewport.mapClickToVoxel(seedLocal.x, seedLocal.y, true)
                 return
             }
@@ -194,23 +266,18 @@ Rectangle {
                 root.windowStartLevel = medicalData.windowLevel
                 return
             }
+            if (root.toolModeIndex === 2 || root.toolModeIndex === 3) {
+                root.interactionLast = Qt.point(mouse.x, mouse.y)
+                return
+            }
             if (root.toolModeIndex === 4) {
                 const local = mapToItem(viewport, mouse.x, mouse.y)
-                if (!annotationController.hasActive) {
-                    const hit = viewport.hitTestControlPoint(local.x, local.y, 14)
-                    if (hit && hit.nodeId !== undefined) {
-                        root.draggingHandle = true
-                        root.dragNodeId = hit.nodeId
-                        root.dragPointIndex = hit.pointIndex
-                        return
-                    }
-                }
-                root.annotationPicking = true
-                if (!viewport.mapClickToVoxel(local.x, local.y, false))
-                    root.annotationPicking = false
+                viewport.beginAnnotationInteraction(local.x, local.y, 14)
             }
         }
         onPositionChanged: mouse => {
+            if (!(mouse.buttons & Qt.LeftButton))
+                return
             if (root.toolModeIndex === 1 && pressed) {
                 const dx = mouse.x - root.windowStart.x
                 const dy = mouse.y - root.windowStart.y
@@ -220,9 +287,23 @@ Rectangle {
                     - dy / Math.max(1, height) * root.windowStartWidth * 2.0
                 return
             }
+            if (root.toolModeIndex === 2 && pressed) {
+                const dx = mouse.x - root.interactionLast.x
+                const dy = mouse.y - root.interactionLast.y
+                viewport.panBy(dx, dy)
+                root.interactionLast = Qt.point(mouse.x, mouse.y)
+                return
+            }
+            if (root.toolModeIndex === 3 && pressed) {
+                const dy = mouse.y - root.interactionLast.y
+                viewport.zoomBy(Math.exp(-dy / 180.0), mouse.x, mouse.y)
+                root.interactionLast = Qt.point(mouse.x, mouse.y)
+                return
+            }
             if (root.draggingHandle && pressed) {
                 const local = mapToItem(viewport, mouse.x, mouse.y)
-                viewport.mapClickToVoxel(local.x, local.y, false)
+                viewport.updateAnnotationControlPoint(
+                            root.dragNodeId, root.dragPointIndex, local.x, local.y)
             }
         }
         onReleased: {
@@ -233,17 +314,44 @@ Rectangle {
             }
         }
         onDoubleClicked: mouse => {
-            if (root.toolModeIndex === 4
-                    && annotationController.toolType === AnnotationTool.PerimeterTool) {
-                annotationController.finishActive()
-                mouse.accepted = true
-            }
+            if (root.toolModeIndex === 2 || root.toolModeIndex === 3)
+                viewport.resetView()
+        }
+        onWheel: wheel => {
+            root.handleWheel(wheel)
         }
     }
 
     property point windowStart: Qt.point(0, 0)
+    property point interactionLast: Qt.point(0, 0)
     property real windowStartWidth: 400.0
     property real windowStartLevel: 40.0
+
+    onSeedPickingChanged: {
+        if (!root.seedPicking)
+            root.seedPickPending = false
+    }
+
+    Rectangle {
+        visible: root.seedPicking && root.seedPickMessage.length === 0
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        anchors.topMargin: 46
+        width: pickModeText.implicitWidth + 22
+        height: 32
+        radius: 3
+        color: "#E61A1F22"
+        border.color: root.viewColor
+        z: 9
+
+        Text {
+            id: pickModeText
+            anchors.centerIn: parent
+            text: "单击切片内目标组织选择种子点"
+            color: Theme.text
+            font.pixelSize: 13
+        }
+    }
 
     Item {
         visible: root.seedMarkerVisible && medicalData.regionGrowingSeedValid
@@ -277,38 +385,53 @@ Rectangle {
     }
 
     Rectangle {
-        id: pickError
-        visible: false
+        id: pickMessage
+        visible: root.seedPickMessage.length > 0
         anchors.centerIn: parent
-        width: Math.min(parent.width - 32, pickErrorText.implicitWidth + 24)
-        height: 36
+        width: Math.min(parent.width - 32, pickMessageText.implicitWidth + 24)
+        height: Math.max(36, pickMessageText.implicitHeight + 16)
         radius: Theme.radius
         color: "#E61A1F22"
-        border.color: Theme.danger
+        border.color: root.seedPickMessageError ? Theme.danger : Theme.accent
         z: 20
-        property alias text: pickErrorText.text
         Text {
-            id: pickErrorText
+            id: pickMessageText
             anchors.centerIn: parent
-            color: Theme.text
+            width: Math.min(implicitWidth, pickMessage.parent.width - 20)
+            text: root.seedPickMessage
+            color: root.seedPickMessageError ? Theme.danger : Theme.text
             font.pixelSize: 13
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
         }
     }
     Timer {
-        id: pickErrorTimer
-        interval: 2500
-        onTriggered: pickError.visible = false
+        id: pickMessageTimer
+        interval: 2600
+        onTriggered: root.seedPickMessage = ""
+    }
+    Timer {
+        id: pickTimeout
+        interval: 4000
+        onTriggered: {
+            if (!root.seedPickPending)
+                return
+            root.seedPickPending = false
+            root.seedPickMessageError = true
+            root.seedPickMessage = "种子点读取超时，请在切片图像内重新单击。"
+            pickMessageTimer.restart()
+        }
     }
 
     Text {
         visible: root.toolModeIndex === 4
                  && root.viewType !== MedicalViewport.Volume3D
-                 && annotationController.toolType === AnnotationTool.PerimeterTool
+                 && annotationController.toolType === AnnotationTool.CurveTool
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: sliceSlider.visible ? sliceSlider.top : parent.bottom
         anchors.bottomMargin: 10
         z: 11
-        text: "单击加点 · 双击/右键闭合 · Esc 取消 · 拖拽控制点编辑"
+        text: "单击添加曲线控制点 · 右键完成 · Esc 取消 · 拖拽控制点编辑"
         color: Theme.textSecondary
         font.pixelSize: 12
     }
@@ -322,6 +445,8 @@ Rectangle {
         anchors.margins: 10
         from: 0
         to: 1
+        stepSize: root.sliceCount > 1 ? 1 / (root.sliceCount - 1) : 1
+        snapMode: Slider.SnapAlways
         value: 0.5
     }
 }

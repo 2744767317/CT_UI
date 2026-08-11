@@ -200,7 +200,8 @@ Dialog {
                     onClicked: root.selectedIndex = index
                     onDoubleClicked: {
                         root.selectedIndex = index
-                        medicalData.selectSeries(index)
+                        medicalData.selectSeriesAsync(index)
+                        root.close()
                     }
                 }
             }
@@ -223,7 +224,10 @@ Dialog {
                 text: "加入工作区"
                 primary: true
                 enabled: root.selectedIndex >= 0
-                onClicked: medicalData.selectSeries(root.selectedIndex)
+                onClicked: {
+                    medicalData.selectSeriesAsync(root.selectedIndex)
+                    root.close()
+                }
             }
         }
     }

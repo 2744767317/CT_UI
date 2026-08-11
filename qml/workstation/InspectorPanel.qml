@@ -54,6 +54,21 @@ Rectangle {
                     || (!root.ctMode && tabs.currentIndex === 1))
                     tabs.currentIndex = 0
             }
+            function onRegionGrowingSeedChanged() {
+                if (!medicalData.regionGrowingSeedValid || !root.seedPicking)
+                    return
+
+                const lower = Math.max(-32768, medicalData.regionGrowingSeedValue - 100)
+                const upper = Math.min(32767, medicalData.regionGrowingSeedValue + 100)
+                growLow.text = String(Math.round(lower))
+                growHigh.text = String(Math.round(upper))
+                root.segmentationVisibilityRequested(true)
+                Qt.callLater(function() {
+                    if (medicalData.regionGrowingSeedValid && !medicalData.busy)
+                        medicalData.applyRegionGrowingFromSeedAsync(
+                            lower, upper, connectivity.currentIndex === 1)
+                })
+            }
         }
 
         StackLayout {
@@ -186,13 +201,22 @@ Rectangle {
                                 text: "应用阈值分割"
                                 primary: true
                                 Layout.fillWidth: true
-                                enabled: medicalData.loaded
-                                onClicked: medicalData.applyThreshold(Number(thresholdLow.text), Number(thresholdHigh.text))
+                                enabled: medicalData.volumeData && !medicalData.busy
+                                onClicked: medicalData.applyThresholdAsync(Number(thresholdLow.text), Number(thresholdHigh.text))
                             }
                         }
 
                         ColumnLayout {
+                            id: regionGrowingControls
                             spacing: 10
+                            property real growLower: Number(growLow.text)
+                            property real growUpper: Number(growHigh.text)
+                            property bool growRangeValid: isFinite(growLower) && isFinite(growUpper)
+                                                          && growLower <= growUpper
+                            property bool seedInGrowRange: medicalData.regionGrowingSeedValid
+                                                           && growRangeValid
+                                                           && medicalData.regionGrowingSeedValue >= growLower
+                                                           && medicalData.regionGrowingSeedValue <= growUpper
                             Text {
                                 Layout.fillWidth: true
                                 text: medicalData.regionGrowingSeedValid
@@ -209,13 +233,13 @@ Rectangle {
                                 text: root.seedPicking ? "取消取点" : (medicalData.regionGrowingSeedValid ? "重新选取种子" : "在切片中选取种子")
                                 active: root.seedPicking
                                 Layout.fillWidth: true
-                                enabled: medicalData.volumeData && medicalBackendEnabled
+                                enabled: medicalData.volumeData && medicalBackendEnabled && !medicalData.busy
                                 onClicked: root.seedPickingRequested(!root.seedPicking)
                             }
                             Text {
                                 visible: root.seedPicking
                                 Layout.fillWidth: true
-                                text: "请在轴状位、冠状位或矢状位目标组织内单击。"
+                                text: "取点模式已开启：在任一二维切片的目标组织内左键单击一次，不要拖动。"
                                 color: Theme.accent
                                 font.pixelSize: 13
                                 wrapMode: Text.WordWrap
@@ -225,17 +249,35 @@ Rectangle {
                                 TextField { id: growLow; Layout.fillWidth: true; text: "-100"; placeholderText: "下限 HU"; validator: DoubleValidator {} }
                                 TextField { id: growHigh; Layout.fillWidth: true; text: "200"; placeholderText: "上限 HU"; validator: DoubleValidator {} }
                             }
+                            Text {
+                                visible: medicalData.regionGrowingSeedValid
+                                         && !regionGrowingControls.seedInGrowRange
+                                Layout.fillWidth: true
+                                text: regionGrowingControls.growRangeValid
+                                      ? "当前种子值不在生长范围内，请调整 HU 上下限。"
+                                      : "HU 下限必须小于或等于上限。"
+                                color: Theme.danger
+                                font.pixelSize: 12
+                                wrapMode: Text.WordWrap
+                            }
+                            ComboBox {
+                                id: connectivity
+                                Layout.fillWidth: true
+                                model: ["6 邻域（面连接）", "26 邻域（全连接）"]
+                            }
                             ActionButton {
                                 text: "执行种子生长"
                                 primary: true
                                 Layout.fillWidth: true
-                                enabled: medicalData.regionGrowingSeedValid && medicalBackendEnabled
-                                onClicked: medicalData.applyRegionGrowingFromSeed(Number(growLow.text), Number(growHigh.text))
+                                enabled: regionGrowingControls.seedInGrowRange
+                                         && medicalBackendEnabled && !medicalData.busy
+                                onClicked: medicalData.applyRegionGrowingFromSeedAsync(
+                                    Number(growLow.text), Number(growHigh.text), connectivity.currentIndex === 1)
                             }
                             ActionButton {
                                 text: "清除种子点"
                                 Layout.fillWidth: true
-                                enabled: medicalData.regionGrowingSeedValid
+                                enabled: medicalData.regionGrowingSeedValid && !medicalData.busy
                                 onClicked: medicalData.clearRegionGrowingSeed()
                             }
                         }
@@ -250,8 +292,18 @@ Rectangle {
                     ActionButton {
                         text: "清除分割结果"
                         Layout.fillWidth: true
-                        enabled: medicalData.segmentationAvailable
+                        enabled: medicalData.segmentationAvailable && !medicalData.busy
                         onClicked: medicalData.clearSegmentation()
+                    }
+                    Text {
+                        visible: medicalData.segmentationAvailable
+                        Layout.fillWidth: true
+                        text: medicalData.segmentationMethod + "  ·  "
+                              + medicalData.segmentationVoxelCount + " 体素  ·  "
+                              + Number(medicalData.segmentationVolumeMl).toFixed(2) + " mL"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
                     }
                 }
             }
