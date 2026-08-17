@@ -15,6 +15,8 @@ set(CT_UI_CORE_COMMON_SOURCES
     src/markups/markupsscene.cpp
     src/markups/markupsscene.h
     src/dicom/dicompresentation.h
+    src/dicom/dicomtextcodec.cpp
+    src/dicom/dicomtextcodec.h
     src/dicom/medicaldatacontroller.h
 )
 

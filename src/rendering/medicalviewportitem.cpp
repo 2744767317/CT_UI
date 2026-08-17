@@ -778,14 +778,14 @@ void MedicalViewportItem::setCropMaximum(double value)
     reloadData();
 }
 
-bool MedicalViewportItem::mapClickToVoxel(double itemX, double itemY, bool updateSeed)
+bool MedicalViewportItem::mapItemPositionToWorld(double itemX, double itemY,
+                                                 QVector3D *worldOut,
+                                                 int *voxelOut) const
 {
-    if (m_viewType == ViewType::Volume3D || !m_controller || !m_volume
+    if (m_viewType == ViewType::Volume3D || !m_volume || !worldOut
         || width() <= 0.0 || height() <= 0.0
-        || itemX < 0.0 || itemY < 0.0 || itemX > width() || itemY > height()) {
-        emit voxelPickFailed(QStringLiteral("当前视图无法拾取体素。"));
+        || itemX < 0.0 || itemY < 0.0 || itemX > width() || itemY > height())
         return false;
-    }
 
     const double unzoomedX = width() * 0.5
         + (itemX - width() * 0.5 - m_viewPanX) / m_viewZoom;
@@ -799,11 +799,23 @@ bool MedicalViewportItem::mapClickToVoxel(double itemX, double itemY, bool updat
     const auto presentation = MarkupsPicker::imagePresentationFor(
         *m_volume, projectionData && m_viewType != ViewType::Volume3D,
         patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
+    return MarkupsPicker::mapClickToWorld(
+        *m_volume, static_cast<int>(m_viewType), m_slicePosition,
+        unzoomedX, unzoomedY, width(), height(), worldOut, voxelOut, presentation);
+}
+
+bool MedicalViewportItem::mapClickToVoxel(double itemX, double itemY, bool updateSeed)
+{
+    if (m_viewType == ViewType::Volume3D || !m_controller || !m_volume
+        || width() <= 0.0 || height() <= 0.0
+        || itemX < 0.0 || itemY < 0.0 || itemX > width() || itemY > height()) {
+        emit voxelPickFailed(QStringLiteral("当前视图无法拾取体素。"));
+        return false;
+    }
+
     QVector3D world;
     int voxel[3] = {0, 0, 0};
-    if (!MarkupsPicker::mapClickToWorld(
-            *m_volume, static_cast<int>(m_viewType), m_slicePosition,
-            unzoomedX, unzoomedY, width(), height(), &world, voxel, presentation)) {
+    if (!mapItemPositionToWorld(itemX, itemY, &world, voxel)) {
         emit voxelPickFailed(QStringLiteral("点击位置不在当前切片图像内。"));
         return false;
     }
@@ -825,6 +837,69 @@ bool MedicalViewportItem::mapClickToVoxel(double itemX, double itemY, bool updat
     emit voxelPicked(voxel[0], voxel[1], voxel[2], value,
                      normalizedX, normalizedY);
     return true;
+}
+
+QVariantMap MedicalViewportItem::mapClickToVoxelInfo(double itemX, double itemY) const
+{
+    QVariantMap result;
+    QVector3D world;
+    int voxel[3] = {0, 0, 0};
+    if (!mapItemPositionToWorld(itemX, itemY, &world, voxel))
+        return result;
+
+    result.insert(QStringLiteral("valid"), true);
+    result.insert(QStringLiteral("voxelX"), voxel[0]);
+    result.insert(QStringLiteral("voxelY"), voxel[1]);
+    result.insert(QStringLiteral("voxelZ"), voxel[2]);
+    result.insert(QStringLiteral("worldX"), world.x());
+    result.insert(QStringLiteral("worldY"), world.y());
+    result.insert(QStringLiteral("worldZ"), world.z());
+    return result;
+}
+
+QVariantMap MedicalViewportItem::mapVoxelToDisplay(int voxelX, int voxelY,
+                                                   int voxelZ) const
+{
+    QVariantMap result;
+    if (m_viewType == ViewType::Volume3D || !m_volume
+        || width() <= 0.0 || height() <= 0.0)
+        return result;
+
+    const auto &dims = m_volume->dimensions;
+    if (voxelX < 0 || voxelX >= dims[0]
+        || voxelY < 0 || voxelY >= dims[1]
+        || voxelZ < 0 || voxelZ >= dims[2])
+        return result;
+
+    const QVector3D world = MarkupsPicker::voxelToWorld(
+        *m_volume, voxelX, voxelY, voxelZ);
+    if (!MarkupsPicker::isPointDisplayableOnSlice(
+            *m_volume, static_cast<int>(m_viewType), m_slicePosition, world))
+        return result;
+
+    const bool projectionData = m_controller && m_controller->projectionData();
+    const QString patientOrientation = m_controller
+        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
+                              : m_controller->patientOrientation())
+        : QString();
+    const auto presentation = MarkupsPicker::imagePresentationFor(
+        *m_volume, projectionData && m_viewType != ViewType::Volume3D,
+        patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
+    double displayX = 0.0;
+    double displayY = 0.0;
+    if (!MarkupsPicker::worldToDisplay(
+            *m_volume, static_cast<int>(m_viewType), m_slicePosition,
+            width(), height(), world, &displayX, &displayY, presentation))
+        return result;
+
+    displayX = width() * 0.5
+        + m_viewZoom * (displayX - width() * 0.5) + m_viewPanX;
+    displayY = height() * 0.5
+        + m_viewZoom * (displayY - height() * 0.5) + m_viewPanY;
+    result.insert(QStringLiteral("valid"), true);
+    result.insert(QStringLiteral("x"), displayX);
+    result.insert(QStringLiteral("y"), displayY);
+    return result;
 }
 
 bool MedicalViewportItem::beginAnnotationInteraction(double itemX, double itemY,
@@ -852,22 +927,9 @@ bool MedicalViewportItem::beginAnnotationInteraction(double itemX, double itemY,
         }
     }
 
-    QVector3D world;
-    const double unzoomedX = width() * 0.5
-        + (itemX - width() * 0.5 - m_viewPanX) / m_viewZoom;
-    const double unzoomedY = height() * 0.5
-        + (itemY - height() * 0.5 - m_viewPanY) / m_viewZoom;
     const bool projectionData = m_controller && m_controller->projectionData();
-    const QString patientOrientation = m_controller
-        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
-                              : m_controller->patientOrientation())
-        : QString();
-    const auto presentation = MarkupsPicker::imagePresentationFor(
-        *m_volume, projectionData && m_viewType != ViewType::Volume3D,
-        patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
-    if (!MarkupsPicker::mapClickToWorld(
-            *m_volume, static_cast<int>(m_viewType), m_slicePosition,
-            unzoomedX, unzoomedY, width(), height(), &world, nullptr, presentation)) {
+    QVector3D world;
+    if (!mapItemPositionToWorld(itemX, itemY, &world)) {
         emit voxelPickFailed(QStringLiteral("点击位置不在当前切片图像内。"));
         return false;
     }
@@ -891,22 +953,8 @@ bool MedicalViewportItem::updateAnnotationControlPoint(int nodeId, int pointInde
         || itemX < 0.0 || itemY < 0.0 || itemX > width() || itemY > height())
         return false;
 
-    const double unzoomedX = width() * 0.5
-        + (itemX - width() * 0.5 - m_viewPanX) / m_viewZoom;
-    const double unzoomedY = height() * 0.5
-        + (itemY - height() * 0.5 - m_viewPanY) / m_viewZoom;
-    const bool projectionData = m_controller && m_controller->projectionData();
-    const QString patientOrientation = m_controller
-        ? (m_pairedProjection ? m_controller->projectionPairOrientation()
-                              : m_controller->patientOrientation())
-        : QString();
-    const auto presentation = MarkupsPicker::imagePresentationFor(
-        *m_volume, projectionData && m_viewType != ViewType::Volume3D,
-        patientOrientation, m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical);
     QVector3D world;
-    if (!MarkupsPicker::mapClickToWorld(
-            *m_volume, static_cast<int>(m_viewType), m_slicePosition,
-            unzoomedX, unzoomedY, width(), height(), &world, nullptr, presentation))
+    if (!mapItemPositionToWorld(itemX, itemY, &world))
         return false;
 
     return m_annotations->updateControlPoint(

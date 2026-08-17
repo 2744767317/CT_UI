@@ -195,6 +195,16 @@ bool MedicalViewportItem::mapClickToVoxel(double, double, bool)
     return false;
 }
 
+QVariantMap MedicalViewportItem::mapClickToVoxelInfo(double, double) const
+{
+    return {};
+}
+
+QVariantMap MedicalViewportItem::mapVoxelToDisplay(int, int, int) const
+{
+    return {};
+}
+
 bool MedicalViewportItem::beginAnnotationInteraction(double, double, double)
 {
     emit voxelPickFailed(QStringLiteral("MinGW UI 兼容模式不提供医学图像拾取。"));

@@ -1,6 +1,7 @@
 #include "src/application/workflowcontroller.h"
 #include "src/annotation/annotationcontroller.h"
 #include "src/dicom/dicompresentation.h"
+#include "src/dicom/dicomtextcodec.h"
 #include "src/dicom/medicaldatacontroller.h"
 #include "src/markups/markupsmetrics.h"
 #include "src/markups/markupspicker.h"
@@ -36,6 +37,7 @@ private slots:
     void pointListAndCurveFollowSlicerSemantics();
     void annotationsAreIsolatedPerDataset();
     void projectionPresentationPolarityIsDetected();
+    void dicomTextCharacterSetsAndDamagedLabels();
     void regionGrowingSeedStateAndValidation();
     void realDicomRoundTripWhenConfigured();
     void recursiveLidcRootLoadsCtAndDx();
@@ -135,6 +137,29 @@ void CoreTests::volumeNodeLifecycle()
     QVERIFY(!data.loaded());
     QVERIFY(data.volumeNodes().isEmpty());
     QCOMPARE(data.selectedVolumeIndex(), -1);
+}
+
+void CoreTests::dicomTextCharacterSetsAndDamagedLabels()
+{
+    const std::string chineseWindowPreset("\xD3\xC3\xBB\xA7\xD1\xA1\xD4\xF1\xCF\xEE", 10);
+    QCOMPARE(DicomTextCodec::decode(chineseWindowPreset, QStringLiteral("GB18030")),
+             QStringLiteral("用户选择项"));
+
+    const char damagedBytes[] = {
+        '?', '1', '?', static_cast<char>(0xA8), static_cast<char>(0xB4),
+        static_cast<char>(0xA8), static_cast<char>(0xA8), '?', '3',
+        static_cast<char>(0xA1), static_cast<char>(0xE8), '2', 'a',
+        static_cast<char>(0xA8), static_cast<char>(0xA2), '?', '?', '?',
+        static_cast<char>(0xA1), static_cast<char>(0xEA), static_cast<char>(0xA1),
+        static_cast<char>(0xA7), 'E', 'O', 'S', ' ', '?', '?',
+        static_cast<char>(0xA8), static_cast<char>(0xA2), static_cast<char>(0xA1),
+        static_cast<char>(0xE9), '?', '?', static_cast<char>(0xA1),
+        static_cast<char>(0xEA), '?', ' '};
+    const QString damaged = DicomTextCodec::decode(
+        std::string(damagedBytes, sizeof(damagedBytes)), QStringLiteral("GB18030"));
+    QVERIFY(!DicomTextCodec::isUsableDisplayText(damaged));
+    QVERIFY(DicomTextCodec::isUsableDisplayText(QStringLiteral("Chest? AP")));
+    QVERIFY(DicomTextCodec::isUsableDisplayText(QStringLiteral("胸部正位")));
 }
 
 void CoreTests::markupsMetricsAndEditing()
@@ -652,11 +677,17 @@ void CoreTests::mixedRootLoadsUnsignedDx()
     QVERIFY(data.seriesChoices().size() >= 14);
 
     int dxIndex = -1;
+    bool damagedLabelSampleFound = false;
     for (const QVariant &entry : data.seriesChoices()) {
         const QVariantMap choice = entry.toMap();
         if (choice.value(QStringLiteral("modality")) == QStringLiteral("DX")) {
-            dxIndex = choice.value(QStringLiteral("index")).toInt();
-            break;
+            if (dxIndex < 0 || choice.value(QStringLiteral("patientId"))
+                                     == QStringLiteral("12117230"))
+                dxIndex = choice.value(QStringLiteral("index")).toInt();
+            if (choice.value(QStringLiteral("patientId")) == QStringLiteral("12117230")) {
+                damagedLabelSampleFound = true;
+                break;
+            }
         }
     }
     QVERIFY(dxIndex >= 0);
@@ -669,6 +700,8 @@ void CoreTests::mixedRootLoadsUnsignedDx()
     QVERIFY(data.volumeSnapshot()->dimensions[1] > 1000);
     QVERIFY(data.projectionData());
     QVERIFY(data.pairedProjectionAvailable());
+    if (damagedLabelSampleFound)
+        QCOMPARE(data.studyDescription(), QStringLiteral("DX 检查"));
     QVERIFY(!data.projectionViewLabel().isEmpty());
     QVERIFY(!data.projectionPairViewLabel().isEmpty());
 

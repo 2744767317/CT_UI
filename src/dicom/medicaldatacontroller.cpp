@@ -1,6 +1,7 @@
 #include "medicaldatacontroller.h"
 
 #include "dicompresentation.h"
+#include "dicomtextcodec.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -30,10 +31,6 @@
 #include <ostream>
 #include <stdexcept>
 #include <streambuf>
-
-#ifdef Q_OS_WIN
-#include <Windows.h>
-#endif
 
 // 目录扫描阶段只读取轻量标签并建立候选对象，直到用户选择后才解码完整像素。
 struct DicomSeriesCandidate
@@ -179,27 +176,6 @@ QString localPath(const QUrl &url)
     return url.isLocalFile() ? url.toLocalFile() : url.toString();
 }
 
-QString decodeDicomBytes(const std::string &value, const QString &characterSet)
-{
-#ifdef Q_OS_WIN
-    if (characterSet.contains(QStringLiteral("GB18030"), Qt::CaseInsensitive)) {
-        const int sourceLength = static_cast<int>(value.size());
-        const int required = MultiByteToWideChar(54936, 0, value.data(), sourceLength,
-                                                  nullptr, 0);
-        if (required > 0) {
-            QString decoded;
-            decoded.resize(required);
-            MultiByteToWideChar(54936, 0, value.data(), sourceLength,
-                                reinterpret_cast<LPWSTR>(decoded.data()), required);
-            return decoded.trimmed();
-        }
-    }
-#else
-    Q_UNUSED(characterSet)
-#endif
-    return QString::fromUtf8(value.data(), static_cast<int>(value.size())).trimmed();
-}
-
 QString dicomText(const itk::MetaDataDictionary &dictionary, const char *tag)
 {
     std::string value;
@@ -209,7 +185,13 @@ QString dicomText(const itk::MetaDataDictionary &dictionary, const char *tag)
     itk::ExposeMetaData<std::string>(dictionary, "0008|0005", characterSetValue);
     const QString characterSet = QString::fromLatin1(characterSetValue.data(),
                                                        static_cast<int>(characterSetValue.size()));
-    return decodeDicomBytes(value, characterSet);
+    return DicomTextCodec::decode(value, characterSet);
+}
+
+QString dicomDisplayText(const itk::MetaDataDictionary &dictionary, const char *tag)
+{
+    const QString text = dicomText(dictionary, tag);
+    return DicomTextCodec::isUsableDisplayText(text) ? text : QString();
 }
 
 QString sopClassLabel(const QString &uid)
@@ -353,15 +335,15 @@ DicomScanResult scanDicomDirectory(const QString &path)
                 auto candidate = groupedSeries.value(groupKey);
                 if (!candidate) {
                     candidate = std::make_shared<DicomSeriesCandidate>();
-                    candidate->patientName = dicomText(dictionary, "0010|0010")
+                    candidate->patientName = dicomDisplayText(dictionary, "0010|0010")
                                                  .replace(QChar(u'^'), QChar(u' '));
                     candidate->patientId = patientId;
                     candidate->patientSex = dicomText(dictionary, "0010|0040");
                     candidate->patientBirthDate = dicomText(dictionary, "0010|0030");
-                    candidate->studyDescription = dicomText(dictionary, "0008|1030");
+                    candidate->studyDescription = dicomDisplayText(dictionary, "0008|1030");
                     candidate->studyDate = dicomText(dictionary, "0008|0020");
                     candidate->studyUid = studyUid;
-                    candidate->seriesDescription = dicomText(dictionary, "0008|103e");
+                    candidate->seriesDescription = dicomDisplayText(dictionary, "0008|103e");
                     candidate->seriesUid = seriesUid;
                     candidate->modality = modality;
                     candidate->sopClassUid = dicomText(dictionary, "0008|0016");
@@ -1123,7 +1105,8 @@ bool MedicalDataController::commitSeriesLoad(SeriesLoadResult result)
                                                                : candidate->patientBirthDate;
     m_modality = candidate->modality;
     m_studyDescription = candidate->studyDescription.isEmpty()
-        ? QStringLiteral("未命名检查") : candidate->studyDescription;
+        ? QStringLiteral("%1 检查").arg(candidate->modality)
+        : candidate->studyDescription;
     m_studyDate = candidate->studyDate.isEmpty() ? QStringLiteral("--")
                                                  : candidate->studyDate;
     m_seriesDescription = candidate->seriesDescription.isEmpty()

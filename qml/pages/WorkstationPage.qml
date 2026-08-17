@@ -56,6 +56,10 @@ Item {
     property real seedSlicePosition: -1.0
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
+    property bool linkedSliceBrowsing: false
+    property int linkedVoxelX: -1
+    property int linkedVoxelY: -1
+    property int linkedVoxelZ: -1
 
     function resetProjectionAdjustments() {
         root.activePairedProjection = false
@@ -75,10 +79,39 @@ Item {
         root.seedPicking = false
     }
 
+    function updateLinkedSliceBrowsing(sourceViewType, voxelX, voxelY, voxelZ) {
+        if (!medicalData.volumeData)
+            return
+
+        // 与 Slicer 一致：鼠标所在位面保持不动，只更新另外两个正交位面。
+        if (sourceViewType !== MedicalViewport.Axial)
+            axialPane.setSliceFromVoxel(voxelX, voxelY, voxelZ)
+        if (sourceViewType !== MedicalViewport.Coronal)
+            coronalPane.setSliceFromVoxel(voxelX, voxelY, voxelZ)
+        if (sourceViewType !== MedicalViewport.Sagittal)
+            sagittalPane.setSliceFromVoxel(voxelX, voxelY, voxelZ)
+
+        root.linkedVoxelX = voxelX
+        root.linkedVoxelY = voxelY
+        root.linkedVoxelZ = voxelZ
+        root.linkedSliceBrowsing = true
+    }
+
+    function stopLinkedSliceBrowsing() {
+        root.linkedSliceBrowsing = false
+        axialPane.shiftBrowsing = false
+        coronalPane.shiftBrowsing = false
+        sagittalPane.shiftBrowsing = false
+    }
+
     Connections {
         target: medicalData
         function onDataChanged() {
             root.resetProjectionAdjustments()
+            root.stopLinkedSliceBrowsing()
+            root.linkedVoxelX = -1
+            root.linkedVoxelY = -1
+            root.linkedVoxelZ = -1
             root.showImage = medicalData.activeVolumeVisible
             root.seedPicking = false
             root.seedViewType = -1
@@ -98,6 +131,12 @@ Item {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Escape) {
             annotationController.cancelActive()
+            event.accepted = true
+        }
+    }
+    Keys.onReleased: event => {
+        if (event.key === Qt.Key_Shift) {
+            root.stopLinkedSliceBrowsing()
             event.accepted = true
         }
     }
@@ -276,6 +315,7 @@ Item {
                     columnSpacing: 3
 
                     ViewportPane {
+                        id: axialPane
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         Layout.row: 0; Layout.column: 0
@@ -296,9 +336,17 @@ Item {
                         seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
                         seedMarkerX: root.seedMarkerX
                         seedMarkerY: root.seedMarkerY
+                        linkedCrosshairVisible: root.linkedSliceBrowsing
+                        linkedCrosshairVoxelX: root.linkedVoxelX
+                        linkedCrosshairVoxelY: root.linkedVoxelY
+                        linkedCrosshairVoxelZ: root.linkedVoxelZ
                         onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
+                        onSliceBrowseRequested: (sourceViewType, voxelX, voxelY, voxelZ) =>
+                            root.updateLinkedSliceBrowsing(sourceViewType, voxelX, voxelY, voxelZ)
+                        onSliceBrowseFinished: root.stopLinkedSliceBrowsing()
                     }
                     ViewportPane {
+                        id: coronalPane
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         Layout.row: root.layoutMode === 2 ? 0 : 1
@@ -318,9 +366,17 @@ Item {
                         seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
                         seedMarkerX: root.seedMarkerX
                         seedMarkerY: root.seedMarkerY
+                        linkedCrosshairVisible: root.linkedSliceBrowsing
+                        linkedCrosshairVoxelX: root.linkedVoxelX
+                        linkedCrosshairVoxelY: root.linkedVoxelY
+                        linkedCrosshairVoxelZ: root.linkedVoxelZ
                         onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
+                        onSliceBrowseRequested: (sourceViewType, voxelX, voxelY, voxelZ) =>
+                            root.updateLinkedSliceBrowsing(sourceViewType, voxelX, voxelY, voxelZ)
+                        onSliceBrowseFinished: root.stopLinkedSliceBrowsing()
                     }
                     ViewportPane {
+                        id: sagittalPane
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         Layout.row: root.layoutMode === 2 ? 0 : 1
@@ -340,7 +396,14 @@ Item {
                         seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
                         seedMarkerX: root.seedMarkerX
                         seedMarkerY: root.seedMarkerY
+                        linkedCrosshairVisible: root.linkedSliceBrowsing
+                        linkedCrosshairVoxelX: root.linkedVoxelX
+                        linkedCrosshairVoxelY: root.linkedVoxelY
+                        linkedCrosshairVoxelZ: root.linkedVoxelZ
                         onSeedSelected: (viewType, x, y, slice) => root.acceptSeed(viewType, x, y, slice)
+                        onSliceBrowseRequested: (sourceViewType, voxelX, voxelY, voxelZ) =>
+                            root.updateLinkedSliceBrowsing(sourceViewType, voxelX, voxelY, voxelZ)
+                        onSliceBrowseFinished: root.stopLinkedSliceBrowsing()
                     }
                     ViewportPane {
                         Layout.fillWidth: true

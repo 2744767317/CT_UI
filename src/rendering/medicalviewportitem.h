@@ -85,6 +85,10 @@ public:
     Q_INVOKABLE void pickVoxel(double itemX, double itemY, bool updateSeed = true);
     /// 按当前切片几何关系同步映射点击到体素（不依赖 VTK PropPicker）。
     Q_INVOKABLE bool mapClickToVoxel(double itemX, double itemY, bool updateSeed = false);
+    /// 无副作用地查询屏幕点对应的 IJK，供 Shift 联动切片浏览使用。
+    Q_INVOKABLE QVariantMap mapClickToVoxelInfo(double itemX, double itemY) const;
+    /// 将 IJK 映射到当前视口显示坐标，供切片交叉线叠加层使用。
+    Q_INVOKABLE QVariantMap mapVoxelToDisplay(int voxelX, int voxelY, int voxelZ) const;
     Q_INVOKABLE bool beginAnnotationInteraction(double itemX, double itemY,
                                                 double tolerancePx = 14.0);
     Q_INVOKABLE bool updateAnnotationControlPoint(int nodeId, int pointIndex,
@@ -132,6 +136,9 @@ public:
 #endif
 
 private:
+    bool mapItemPositionToWorld(double itemX, double itemY,
+                                QVector3D *worldOut, int *voxelOut = nullptr) const;
+
     ViewType m_viewType = ViewType::Axial;
     MedicalDataController *m_controller = nullptr;
     AnnotationController *m_annotations = nullptr;

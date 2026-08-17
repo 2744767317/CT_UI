@@ -37,7 +37,17 @@ Rectangle {
     property int dragNodeId: -1
     property int dragPointIndex: -1
     property bool middlePanning: false
+    property bool shiftBrowsing: false
+    property bool linkedCrosshairVisible: false
+    property int linkedCrosshairVoxelX: -1
+    property int linkedCrosshairVoxelY: -1
+    property int linkedCrosshairVoxelZ: -1
+    property bool linkedCrosshairOnSlice: false
+    property real linkedCrosshairDisplayX: 0.0
+    property real linkedCrosshairDisplayY: 0.0
     signal seedSelected(int viewType, real normalizedX, real normalizedY, real slicePosition)
+    signal sliceBrowseRequested(int sourceViewType, int voxelX, int voxelY, int voxelZ)
+    signal sliceBrowseFinished()
     signal activated()
 
     readonly property bool measureMode: root.toolModeIndex === 4
@@ -49,6 +59,10 @@ Rectangle {
             || root.toolModeIndex === 2
             || root.toolModeIndex === 3
             || root.toolModeIndex === 4
+    readonly property color crosshairHorizontalColor:
+            root.viewType === MedicalViewport.Axial ? Theme.coronal : Theme.axial
+    readonly property color crosshairVerticalColor:
+            root.viewType === MedicalViewport.Sagittal ? Theme.coronal : Theme.sagittal
 
     function stepSlice(direction) {
         if (root.sliceCount <= 1 || direction === 0)
@@ -57,6 +71,65 @@ Rectangle {
         const current = Math.round(sliceSlider.value * last)
         const next = Math.max(0, Math.min(last, current + direction))
         sliceSlider.value = next / last
+    }
+
+    function setSliceFromVoxel(voxelX, voxelY, voxelZ) {
+        if (root.sliceCount <= 1 || root.viewType === MedicalViewport.Volume3D)
+            return
+        let coordinate = voxelZ
+        if (root.viewType === MedicalViewport.Coronal)
+            coordinate = voxelY
+        else if (root.viewType === MedicalViewport.Sagittal)
+            coordinate = voxelX
+        const last = root.sliceCount - 1
+        sliceSlider.value = Math.max(0, Math.min(last, coordinate)) / last
+    }
+
+    function updateCrosshairDisplay() {
+        if (!root.linkedCrosshairVisible
+                || root.viewType === MedicalViewport.Volume3D
+                || root.linkedCrosshairVoxelX < 0
+                || root.linkedCrosshairVoxelY < 0
+                || root.linkedCrosshairVoxelZ < 0) {
+            root.linkedCrosshairOnSlice = false
+            return
+        }
+        const point = viewport.mapVoxelToDisplay(
+                    root.linkedCrosshairVoxelX,
+                    root.linkedCrosshairVoxelY,
+                    root.linkedCrosshairVoxelZ)
+        root.linkedCrosshairOnSlice = point.valid === true
+        if (root.linkedCrosshairOnSlice) {
+            root.linkedCrosshairDisplayX = point.x
+            root.linkedCrosshairDisplayY = point.y
+        }
+    }
+
+    function stopShiftBrowsing() {
+        if (!root.shiftBrowsing)
+            return
+        root.shiftBrowsing = false
+        root.sliceBrowseFinished()
+    }
+
+    function updateShiftBrowsing(mouse) {
+        if (!medicalData.volumeData || root.viewType === MedicalViewport.Volume3D)
+            return false
+        if (!(mouse.modifiers & Qt.ShiftModifier)) {
+            root.stopShiftBrowsing()
+            return false
+        }
+
+        root.shiftBrowsing = true
+        const local = root.mapToItem(viewport, mouse.x, mouse.y)
+        const point = viewport.mapClickToVoxelInfo(local.x, local.y)
+        if (point.valid === true) {
+            root.sliceBrowseRequested(root.viewType,
+                                      point.voxelX, point.voxelY, point.voxelZ)
+        } else {
+            root.sliceBrowseFinished()
+        }
+        return true
     }
 
     function handleWheel(wheel) {
@@ -121,6 +194,20 @@ Rectangle {
         if (root.handleZoomShortcut(event.key))
             event.accepted = true
     }
+    Keys.onReleased: event => {
+        if (event.key === Qt.Key_Shift) {
+            root.stopShiftBrowsing()
+            event.accepted = true
+        }
+    }
+
+    onLinkedCrosshairVisibleChanged: Qt.callLater(root.updateCrosshairDisplay)
+    onLinkedCrosshairVoxelXChanged: Qt.callLater(root.updateCrosshairDisplay)
+    onLinkedCrosshairVoxelYChanged: Qt.callLater(root.updateCrosshairDisplay)
+    onLinkedCrosshairVoxelZChanged: Qt.callLater(root.updateCrosshairDisplay)
+    onSlicePositionChanged: Qt.callLater(root.updateCrosshairDisplay)
+    onWidthChanged: Qt.callLater(root.updateCrosshairDisplay)
+    onHeightChanged: Qt.callLater(root.updateCrosshairDisplay)
 
     onShowMeasurementsChanged: viewport.showAnnotations = root.showMeasurements
     Component.onCompleted: {
@@ -205,22 +292,70 @@ Rectangle {
         z: 6
     }
 
+    Item {
+        anchors.fill: viewport
+        z: 9
+        clip: true
+        visible: root.linkedCrosshairOnSlice
+
+        Rectangle {
+            x: Math.round(root.linkedCrosshairDisplayX)
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: 1
+            color: root.crosshairVerticalColor
+            opacity: 0.92
+        }
+        Rectangle {
+            y: Math.round(root.linkedCrosshairDisplayY)
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 1
+            color: root.crosshairHorizontalColor
+            opacity: 0.92
+        }
+        Rectangle {
+            x: Math.round(root.linkedCrosshairDisplayX) - 3
+            y: Math.round(root.linkedCrosshairDisplayY) - 3
+            width: 7
+            height: 7
+            radius: 3.5
+            color: "transparent"
+            border.width: 1
+            border.color: Theme.text
+        }
+    }
+
     MouseArea {
         anchors.fill: parent
         z: 7
+        hoverEnabled: true
         enabled: medicalData.loaded && !root.seedPicking
                  && root.viewType !== MedicalViewport.Volume3D && !root.captureInput
         acceptedButtons: Qt.AllButtons
         preventStealing: true
+        cursorShape: root.shiftBrowsing ? Qt.CrossCursor : Qt.ArrowCursor
         onPressed: mouse => {
             root.activated()
             root.forceActiveFocus()
+            if (root.updateShiftBrowsing(mouse)) {
+                mouse.accepted = true
+                return
+            }
             root.beginMiddlePan(mouse)
             mouse.accepted = true
         }
-        onPositionChanged: mouse => root.updateMiddlePan(mouse)
+        onPositionChanged: mouse => {
+            if (root.updateShiftBrowsing(mouse))
+                return
+            root.updateMiddlePan(mouse)
+        }
         onReleased: mouse => root.endMiddlePan(mouse)
-        onCanceled: root.middlePanning = false
+        onCanceled: {
+            root.middlePanning = false
+            root.stopShiftBrowsing()
+        }
+        onExited: root.stopShiftBrowsing()
         onWheel: wheel => {
             root.handleWheel(wheel)
         }
@@ -261,13 +396,17 @@ Rectangle {
                  && !root.seedPickPending
                  && root.captureInput
         preventStealing: true
-        cursorShape: root.seedPicking || root.toolModeIndex === 4
+        cursorShape: root.shiftBrowsing
                      ? Qt.CrossCursor
-                     : (root.toolModeIndex === 3 ? Qt.SizeVerCursor : Qt.SizeAllCursor)
+                     : (root.seedPicking || root.toolModeIndex === 4
+                     ? Qt.CrossCursor
+                     : (root.toolModeIndex === 3 ? Qt.SizeVerCursor : Qt.SizeAllCursor))
 
         onPressed: mouse => {
             root.activated()
             root.forceActiveFocus()
+            if (root.updateShiftBrowsing(mouse))
+                return
             if (root.beginMiddlePan(mouse))
                 return
             if (mouse.button === Qt.RightButton) {
@@ -306,6 +445,8 @@ Rectangle {
             }
         }
         onPositionChanged: mouse => {
+            if (root.updateShiftBrowsing(mouse))
+                return
             if (root.updateMiddlePan(mouse))
                 return
             if (!(mouse.buttons & Qt.LeftButton))
@@ -346,7 +487,11 @@ Rectangle {
                 root.dragPointIndex = -1
             }
         }
-        onCanceled: root.middlePanning = false
+        onCanceled: {
+            root.middlePanning = false
+            root.stopShiftBrowsing()
+        }
+        onExited: root.stopShiftBrowsing()
         onDoubleClicked: mouse => {
             if (root.toolModeIndex === 2 || root.toolModeIndex === 3)
                 viewport.resetView()
