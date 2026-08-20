@@ -1,27 +1,24 @@
 include_guard(GLOBAL)
 
-set(_ct_backend_default ON)
-if(MINGW)
-    # 当前医学 SDK 是 MSVC ABI，MinGW 默认只编译 UI 兼容层。
-    set(_ct_backend_default OFF)
-endif()
-
 option(CT_ENABLE_MEDICAL_BACKEND
-    "Enable DICOM, ITK segmentation, and VTK rendering" ${_ct_backend_default})
+    "Enable DICOM, ITK segmentation, and VTK rendering" ON)
 option(CT_ENABLE_RTK_BACKEND
     "Link RTK reconstruction and its CUDA dependencies" OFF)
 
 macro(ct_configure_medical_dependencies)
+    if(NOT MSVC)
+        message(FATAL_ERROR
+            "The medical backend requires MSVC; MinGW is not supported.")
+    endif()
+    if(NOT CT_ENABLE_MEDICAL_BACKEND)
+        message(FATAL_ERROR
+            "CT_ENABLE_MEDICAL_BACKEND must remain ON for the MSVC workstation build.")
+    endif()
     if(CT_ENABLE_RTK_BACKEND AND NOT CT_ENABLE_MEDICAL_BACKEND)
         message(FATAL_ERROR "CT_ENABLE_RTK_BACKEND requires CT_ENABLE_MEDICAL_BACKEND=ON.")
     endif()
 
     if(CT_ENABLE_MEDICAL_BACKEND)
-        if(NOT MSVC)
-            message(FATAL_ERROR
-                "The installed VTK/ITK/RTK packages use the MSVC ABI. "
-                "Use an MSVC kit or disable CT_ENABLE_MEDICAL_BACKEND.")
-        endif()
 
         if(MSVC AND DEFINED MSVC_TOOLSET_VERSION AND
            NOT MSVC_TOOLSET_VERSION STREQUAL "143")
@@ -136,7 +133,5 @@ macro(ct_configure_medical_dependencies)
         else()
             message(STATUS "  RTK 2.5    : installed but not linked (CT_ENABLE_RTK_BACKEND=OFF)")
         endif()
-    else()
-        message(STATUS "CT medical backend disabled: portable QML/UI mode")
     endif()
 endmacro()

@@ -23,15 +23,9 @@ target_link_libraries(CT_UI_core_tests PRIVATE
 ct_copy_medical_runtime_dlls(CT_UI_core_tests)
 add_test(NAME core_tests COMMAND CT_UI_core_tests)
 
-# CTest 直接启动可执行文件时没有 Qt Creator 的运行环境，需要显式补充 DLL 路径。
-if(MINGW)
-    set_tests_properties(core_tests PROPERTIES
-        ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:${Qt6_DIR}/../../../bin"
-    )
-elseif(MSVC AND CT_ENABLE_MEDICAL_BACKEND)
-    set_tests_properties(core_tests PROPERTIES
-        ENVIRONMENT_MODIFICATION
-            "PATH=path_list_prepend:${VTK_DIR}/../../../bin;PATH=path_list_prepend:${ITK_DIR}/../../../bin;PATH=path_list_prepend:${Qt6_DIR}/../../../bin"
-    )
-endif()
+# CTest 直接启动可执行文件时没有 Qt Creator 的运行环境，需要显式补充
+# MSVC 下的 Qt、VTK 和 ITK DLL 路径。
+set_tests_properties(core_tests PROPERTIES
+    ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${VTK_DIR}/../../../bin;PATH=path_list_prepend:${ITK_DIR}/../../../bin;PATH=path_list_prepend:${Qt6_DIR}/../../../bin"
+)

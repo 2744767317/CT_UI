@@ -18,7 +18,8 @@ int main(int argc, char *argv[])
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     QGuiApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("光索科技"));
-    QCoreApplication::setApplicationName(QStringLiteral("CT_UI"));
+    QCoreApplication::setApplicationName(
+        QStringLiteral("基于正交投影的超低剂量全身骨骼二维三维成像系统"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.3.0"));
 
     qmlRegisterType<MedicalViewportItem>("GuangSuo.CT.Rendering", 1, 0, "MedicalViewport");

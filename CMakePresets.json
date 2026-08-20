@@ -21,26 +21,11 @@
       "binaryDir": "${sourceDir}/../CT_UI-build/msvc-v143-debug",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Debug",
-        "CMAKE_PREFIX_PATH": "F:/Qt/6.10.3/msvc2022_64",
-        "Qt6_DIR": "F:/Qt/6.10.3/msvc2022_64/lib/cmake/Qt6",
+        "CMAKE_PREFIX_PATH": "F:/QT/6.10.3/msvc2022_64",
+        "Qt6_DIR": "F:/QT/6.10.3/msvc2022_64/lib/cmake/Qt6",
         "CT_MEDICAL_SDK_ROOT": "E:/A/GuangSuo",
         "CT_ENABLE_MEDICAL_BACKEND": "ON",
         "CT_ENABLE_RTK_BACKEND": "OFF",
-        "CT_UI_BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "mingw-ui-debug",
-      "displayName": "CT UI - MinGW UI Compatibility",
-      "generator": "MinGW Makefiles",
-      "binaryDir": "${sourceDir}/../CT_UI-build/mingw-ui-debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_COMPILER": "F:/Qt/Tools/mingw1310_64/bin/g++.exe",
-        "CMAKE_MAKE_PROGRAM": "F:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe",
-        "CMAKE_PREFIX_PATH": "F:/Qt/6.10.3/mingw_64",
-        "Qt6_DIR": "F:/Qt/6.10.3/mingw_64/lib/cmake/Qt6",
-        "CT_ENABLE_MEDICAL_BACKEND": "OFF",
         "CT_UI_BUILD_TESTS": "ON"
       }
     }
@@ -51,11 +36,6 @@
       "configurePreset": "msvc-v143-debug",
       "configuration": "Debug",
       "jobs": 8
-    },
-    {
-      "name": "mingw-ui-debug",
-      "configurePreset": "mingw-ui-debug",
-      "jobs": 8
     }
   ],
   "testPresets": [
@@ -63,13 +43,6 @@
       "name": "msvc-v143-debug",
       "configurePreset": "msvc-v143-debug",
       "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      }
-    },
-    {
-      "name": "mingw-ui-debug",
-      "configurePreset": "mingw-ui-debug",
       "output": {
         "outputOnFailure": true
       }

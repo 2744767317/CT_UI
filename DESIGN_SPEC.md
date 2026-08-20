@@ -1,4 +1,4 @@
-# 光索科技 CT 影像工作站改版说明
+# 基于正交投影的超低剂量全身骨骼二维三维成像系统改版说明
 
 版本：3.0 QML Medical Workstation Foundation
 目标屏幕：1920 x 1080 工控屏，100% 缩放
@@ -65,17 +65,17 @@ QML 不持有 ITK/VTK 对象。C++ 将体数据和掩膜转换为只读快照，
 | DICOM | 单文件、目录最大序列、患者/检查标签 | 尚无本地数据库、PACS、DICOMDIR 浏览器 |
 | 二维显示 | 单幅 X 线、三个正交切片、窗宽窗位 | 尚无诊断级方向标记和十字线联动 |
 | 基本工具 | 切片、平移/缩放、近似物理长度 | 测量尚未写入持久化对象，裁剪仅限 3D Z 轴 |
-| 分割 | 阈值、Connected Threshold 种子生长 | 尚无画笔、撤销栈、形态学与统计 |
+| 分割 | 阈值、种子生长、骨骼/软组织/肺部/血管预设、彩色叠加 | 尚无画笔、撤销栈、形态学与多标签分割 |
 | 三维 | GPU 体绘制、MIP、裁剪、分割表面 | 尚无传递函数编辑器和多分割对象管理 |
-| 导出 | 原始 DICOM 实例副本 | 尚无派生 DICOM、SEG、匿名化和 PACS 发送 |
+| 导出 | 可重载病例包：原始 DICOM、三维掩膜、测量标注和操作记录 | 当前仍不是 DICOM SEG/SR，尚无匿名化和 PACS 发送 |
 
 ## 6. 构建策略
 
-MSVC v143 是完整后端的发布基线。仓库预设选择 v143 14.44，以兼容当前 Qt、VTK/ITK 包及 CUDA 12.8。Qt Creator 默认 Kit 的 v145 14.50 已通过当前 DICOM、ITK 分割和 VTK/QML 运行验证，可用于本阶段开发；后续启用 CUDA 12.8/RTK GPU 路径时必须切回 v143。
+MSVC v143 是完整后端的唯一基线。仓库预设选择 v143 14.44，以兼容当前 Qt、VTK/ITK 包及 CUDA 12.8；Qt Creator 不应切换到其他工具集。
 
 Qt Creator 普通 Kit 不会自动继承 Preset 的包路径。CMake 在本机默认从 `E:/A/GuangSuo/VTK_INSTALL/install_debug` 和 `E:/A/GuangSuo/ITK_INSTALL/install_debug` 定位配置文件，并允许通过 `CT_VTK_INSTALL_DIR`、`CT_ITK_INSTALL_DIR` 或 `VTK_DIR`、`ITK_DIR` 覆盖。构建后从 `TARGET_RUNTIME_DLLS` 中筛选并复制 VTK/ITK 传递 DLL，避免运行配置依赖全局医学库 `PATH`；Qt DLL 和插件仍由 Qt Creator Kit 管理，独立发布使用 `windeployqt`。
 
-MinGW 使用相同 QML 文件和控制器接口，当前关闭 `CT_ENABLE_MEDICAL_BACKEND`。这是 ABI 限制，不是 UI 分叉。未来提供 MinGW 编译的 VTK/ITK/RTK 后，可在该预设中打开完整后端。
+项目固定使用 MSVC x64 构建。当前 VTK/ITK/RTK 安装树按 MSVC ABI 提供，CMake 会拒绝 MinGW 或关闭医学后端的配置，确保开发、测试和发布使用同一套 DICOM、ITK、VTK 运行链路。
 
 当前 ITK 安装存在两个打包问题：`ITKVtkGlue` 带有旧机器的绝对 VTK 路径，`TotalVariation` 依赖缺失的 Eigen 配置。CMake 只加载当前功能实际需要的 GDCM、Thresholding 和 RegionGrowing 模块。RTK 尚未进入运行链路。
 
@@ -113,7 +113,7 @@ MinGW 使用相同 QML 文件和控制器接口，当前关闭 `CT_ENABLE_MEDICA
 ## 9. 空状态与错误状态
 
 - 未选患者：视口显示导入入口，后续步骤不可进入；
-- MinGW UI 模式：保留完整布局并明确显示“无医学后端”，不伪造影像；
+- 医学后端未启用：构建配置直接失败，不进入可伪造影像的兼容模式；
 - DICOM 无序列：保留当前数据并显示读取错误；
 - 标签缺失：字段显示“未提供”，不得用演示值填充；
 - 参数无效：拒绝分割并在左侧状态区显示具体原因；
@@ -126,7 +126,7 @@ MinGW 使用相同 QML 文件和控制器接口，当前关闭 `CT_ENABLE_MEDICA
 
 | 阶段 | 目标 | 主要交付 |
 |---|---|---|
-| Phase A 基础框架 | 已完成 | QML 四页、MSVC/MinGW 预设、DICOM/ITK/VTK 最小链路 |
+| Phase A 基础框架 | 已完成 | QML 四页、MSVC 预设、DICOM/ITK/VTK 最小链路 |
 | Phase B 影像交互 | 下一阶段 | 十字线联动、方向标记、活动视图、测量对象、2D ROI 裁剪、撤销重做 |
 | Phase C 数据模型 | 待开始 | Patient/Study/Series 场景模型、本地数据库、多序列选择、派生对象持久化 |
 | Phase D 高级分割 | 待开始 | 画笔、擦除、形态学、分割统计、表面平滑、DICOM SEG |

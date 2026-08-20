@@ -2,6 +2,9 @@
 
 #include "markupsmetrics.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace {
 
 QVariantMap pointVariant(const QVector3D &p)
@@ -161,6 +164,72 @@ QVariantList MarkupsScene::renderItemsVariant() const
         list.push_back(nodeVariant(preview));
     }
     return list;
+}
+
+bool MarkupsScene::restoreItems(const QVariantList &items)
+{
+    std::vector<MarkupsNode> restored;
+    restored.reserve(static_cast<std::size_t>(items.size()));
+    int nextId = 1;
+
+    for (const QVariant &entry : items) {
+        const QVariantMap map = entry.toMap();
+        bool typeOk = false;
+        const int rawType = map.value(QStringLiteral("type")).toInt(&typeOk);
+        if (!typeOk || rawType < static_cast<int>(MarkupsNodeType::Point)
+            || rawType > static_cast<int>(MarkupsNodeType::ClosedCurve))
+            return false;
+
+        const QVariantList pointValues = map.value(QStringLiteral("points")).toList();
+        const int required = requiredPoints(static_cast<MarkupsNodeType>(rawType));
+        if (pointValues.isEmpty()
+            || (rawType != static_cast<int>(MarkupsNodeType::ClosedCurve)
+                && pointValues.size() < required))
+            return false;
+
+        MarkupsNode node;
+        node.id = map.value(QStringLiteral("id")).toInt();
+        if (node.id <= 0)
+            node.id = nextId;
+        for (const MarkupsNode &existing : restored) {
+            if (existing.id == node.id)
+                return false;
+        }
+        nextId = std::max(nextId, node.id + 1);
+        node.type = static_cast<MarkupsNodeType>(rawType);
+        node.label = map.value(QStringLiteral("label")).toString();
+        node.color = map.value(QStringLiteral("color"), node.color).toString();
+        node.viewId = map.value(QStringLiteral("viewId")).toString();
+        node.visible = map.value(QStringLiteral("visible"), true).toBool();
+        node.closed = map.value(QStringLiteral("closed"), false).toBool();
+        for (const QVariant &pointValue : pointValues) {
+            const QVariantMap point = pointValue.toMap();
+            bool xOk = false;
+            bool yOk = false;
+            bool zOk = false;
+            const float x = point.value(QStringLiteral("x")).toFloat(&xOk);
+            const float y = point.value(QStringLiteral("y")).toFloat(&yOk);
+            const float z = point.value(QStringLiteral("z")).toFloat(&zOk);
+            if (!xOk || !yOk || !zOk || !std::isfinite(x) || !std::isfinite(y)
+                || !std::isfinite(z))
+                return false;
+            node.controlPoints.emplace_back(x, y, z);
+        }
+        if (node.type == MarkupsNodeType::ClosedCurve && node.controlPoints.size() < 2)
+            return false;
+        refreshMarkupsMetrics(&node);
+        restored.push_back(std::move(node));
+    }
+
+    m_nodes = std::move(restored);
+    m_active.reset();
+    m_nextId = nextId;
+    m_nextPoint = 1;
+    m_nextLength = 1;
+    m_nextAngle = 1;
+    m_nextCurve = 1;
+    bump();
+    return true;
 }
 
 bool MarkupsScene::tryCommitActive()

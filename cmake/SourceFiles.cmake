@@ -33,14 +33,6 @@ set(CT_UI_MEDICAL_RENDERING_SOURCES
     src/rendering/medicalviewportitem.cpp
 )
 
-# MinGW 兼容模式：保持 QML API 一致，但不跨 ABI 链接 MSVC 医学库。
-set(CT_UI_COMPATIBILITY_CORE_SOURCES
-    src/dicom/medicaldatacontroller_stub.cpp
-)
-set(CT_UI_COMPATIBILITY_RENDERING_SOURCES
-    src/rendering/medicalviewportitem_stub.cpp
-)
-
 # QML 文件显式列出，新增页面或组件时必须同步加入此清单。
 set(CT_UI_QML_FILES
     qml/Main.qml

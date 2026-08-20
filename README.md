@@ -1,4 +1,4 @@
-# 光索科技 CT 影像工作站
+# 基于正交投影的超低剂量全身骨骼二维三维成像系统
 
 基于 Qt 6 QML、VTK 和 ITK 的 CT/X 线桌面影像工作站。界面采用四页任务流：患者确认、联锁检查、扫描范围、影像工作站。QML 负责表现与交互，C++ 负责流程状态、DICOM 数据、ITK 算法和 VTK 渲染。
 
@@ -15,25 +15,36 @@
 - Slicer 风格 Shift 联动浏览：鼠标所在位面保持不动，另外两个正交位面跟随交叉点更新；
 - 后台完成目录扫描、DICOM 像素解码、阈值分割和种子生长，避免阻塞 GUI；
 - ITK 二值阈值分割和 Connected Threshold 种子生长，支持 6/26 邻域及体积统计；
+- 阈值/种子生长组织预设：骨骼、软组织、肺部、血管/增强；分割叠加和三维表面支持独立颜色与透明度；
 - 切片分割叠加、三维分割表面、MIP 和 Z 轴裁剪；
 - 多个 Volume 驻留、切换、重命名、显隐和移除；
-- 将当前数据的原始 DICOM 实例完整复制到指定目录。
+- 导出可重载病例包：独立目录内包含原始 DICOM、三维分割掩膜、测量/标注、窗宽窗位和关键操作记录；再次导入该目录可恢复工作区。
 
-当前“DICOM 导出”只是原始实例副本，不会生成修改后的派生 DICOM，也不会写回标签或像素数据。DICOM SEG、Secondary Capture、匿名化和审计仍属于后续工作。
+病例包使用软件自有的 `case.json` + `segmentation/mask.raw` 开放文件布局；其中的 DICOM 是未改写的原始实例。它不是 DICOM SEG、DICOM SR 或 Secondary Capture，不可作为临床互操作、诊断归档或医疗器械审计记录。DICOM SEG/SR、匿名化和审计仍属于后续工作。
+
+病例包目录示例：
+
+```text
+E:/A/导出TEST/
+  LIDC-IDRI-0001_20260820_143012/
+    case.json                 患者/序列、显示状态、测量标注和操作记录
+    dicom/                    原始 DICOM 实例副本
+    segmentation/mask.raw     与原 CT 几何一致的 0/1 三维分割掩膜
+```
 
 ## 推荐环境
 
 已验证的完整医学后端使用 MSVC：
 
 ```text
-Qt       F:/Qt/6.10.3/msvc2022_64
+Qt       F:/QT/6.10.3/msvc2022_64
 MSVC     Visual Studio 2026 + v143 14.44.35207
 VTK      E:/A/GuangSuo/VTK_INSTALL/install_debug
 ITK/RTK  E:/A/GuangSuo/ITK_INSTALL/install_debug
 CUDA     C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8
 ```
 
-现有 VTK、ITK、RTK 是 MSVC ABI 的 Debug 二进制库。MinGW 预设只编译同一套 QML 界面和兼容占位后端，不能直接链接这些 MSVC 库。若要在 MinGW 下启用医学能力，必须使用同一 MinGW 工具链重新编译全部医学三方库。
+现有 VTK、ITK、RTK 是 MSVC ABI 的 Debug 二进制库，因此本项目固定使用 MSVC，不提供 MinGW 构建。所有开发、测试和发布构建都必须使用 Windows x64 MSVC 工具链。
 
 ## CMake 构建步骤
 
@@ -49,12 +60,11 @@ cmake --version
 cmake --list-presets
 ```
 
-仓库提供两个 configure/build/test preset：
+仓库提供一个 configure/build/test preset：
 
 | Preset | 工具链 | 医学后端 | 用途 |
 | --- | --- | --- | --- |
-| `msvc-v143-debug` | Visual Studio 2026、x64、v143 | `ON` | 完整 DICOM、ITK、VTK 工作站，日常开发首选 |
-| `mingw-ui-debug` | Qt MinGW 13.1、x64 | `OFF` | 只验证 QML/UI 和兼容占位后端，不提供真实医学处理 |
+| `msvc-v143-debug` | Visual Studio 2026、x64、v143 | `ON` | 完整 DICOM、GDCM、ITK、VTK 工作站，唯一支持的构建 |
 
 `CMakePresets.json` 中记录的是当前开发机的 Qt 和医学 SDK 路径。换机器时应通过不提交 Git 的 `CMakeUserPresets.json` 创建一个继承预设，并覆盖 `CMAKE_PREFIX_PATH`、`Qt6_DIR`、`CT_MEDICAL_SDK_ROOT` 和 `binaryDir`；不要把个人安装路径写进 C++ 或 QML 源文件。
 
@@ -130,20 +140,7 @@ ctest --preset msvc-v143-debug -R core_tests --output-on-failure --verbose
 
 从 Qt Creator 外单独复制程序到新目录时，还需使用同版本 Qt 的 `windeployqt` 部署 Qt Quick 模块和平台插件；医学 DLL 已由构建规则复制，但 Qt 运行环境不会由手工复制一个 EXE 自动获得。
 
-### 6. MinGW UI 兼容构建
-
-MinGW 预设用于验证同一套 QML 和 C++ 接口能否编译，不会链接 MSVC ABI 的 VTK/ITK 库：
-
-```powershell
-cmake --preset mingw-ui-debug --fresh
-cmake --build --preset mingw-ui-debug --target CT_UI --parallel 8
-cmake --build --preset mingw-ui-debug --target CT_UI_core_tests --parallel 8
-ctest --preset mingw-ui-debug --output-on-failure
-```
-
-该预设自动选择 `medicaldatacontroller_stub.cpp` 和 `medicalviewportitem_stub.cpp`。需要在 MinGW 下运行真实医学后端时，必须先用相同 MinGW 工具链重新构建 Qt 匹配的 VTK、ITK 和 RTK，不能直接链接现有 MSVC `.lib`。
-
-### 7. Qt Creator 构建
+### 6. Qt Creator 构建
 
 1. 打开仓库根目录的 `CMakeLists.txt`。
 2. 选择 `CT UI - MSVC v143 Debug (Recommended)` CMake Preset。
@@ -160,7 +157,7 @@ Debug 默认设置 `CT_UI_ENABLE_QML_CACHEGEN=OFF`，减少修改 QML 后产生�
 Qt、VTK、ITK、RTK 和 CUDA 都位于仓库外，没有复制进项目。`CMakePresets.json` 给当前开发机传入：
 
 ```cmake
-CMAKE_PREFIX_PATH=F:/Qt/6.10.3/msvc2022_64
+CMAKE_PREFIX_PATH=F:/QT/6.10.3/msvc2022_64
 CT_MEDICAL_SDK_ROOT=E:/A/GuangSuo
 ```
 
@@ -207,7 +204,7 @@ ctest --preset msvc-v143-debug --output-on-failure
 ```text
 CT_UI/
 ├─ CMakeLists.txt                 项目入口，只负责目标和模块的总装配
-├─ CMakePresets.json              MSVC/MinGW configure、build、test 预设
+├─ CMakePresets.json              MSVC configure、build、test 预设
 ├─ DESIGN_SPEC.md                 页面设计与后续阶段规划
 ├─ README.md                      项目入口文档
 ├─ cmake/
@@ -251,11 +248,11 @@ CT_UI/
 │  │  ├─ dicompresentation.h      投影显示方向和灰度呈现辅助逻辑
 │  │  ├─ medicaldatacontroller.h  医学数据、Volume、分割的稳定公共 API
 │  │  ├─ medicaldatacontroller.cpp 真实 DICOM/ITK 医学后端
-│  │  └─ medicaldatacontroller_stub.cpp MinGW UI 兼容后端
+│  │  └─ medicaldatacontroller.cpp  DICOM/ITK 医学后端
 │  └─ rendering/
 │     ├─ medicalviewportitem.h    QML 可见的统一视口接口
 │     ├─ medicalviewportitem.cpp  VTK MPR、体绘制、标注叠加和拾取
-│     └─ medicalviewportitem_stub.cpp 无 VTK 时的兼容绘制实现
+│     └─ medicalviewportitem.cpp      VTK MPR、体绘制和交互
 └─ tests/
    ├─ CMakeLists.txt              测试目标、链接依赖和 CTest 环境
    └─ core_tests.cpp              工作流、DICOM、分割、坐标和标注测试
@@ -293,16 +290,14 @@ QML 只通过 Qt 属性、信号和 `Q_INVOKABLE` 接口访问 C++。GUI 线程�
 
 ### CMake 目标与源码分组
 
-`cmake/SourceFiles.cmake` 把文件分成后端无关部分和可替换后端，根 `CMakeLists.txt` 根据 `CT_ENABLE_MEDICAL_BACKEND` 选择实现：
+`cmake/SourceFiles.cmake` 保留公共层与 MSVC 医学实现的清单。根 `CMakeLists.txt` 强制检查 MSVC，并始终链接 DICOM、ITK、VTK 后端：
 
 | 源码集合/目标 | 内容 |
 | --- | --- |
 | `CT_UI_CORE_COMMON_SOURCES` | application、annotation、markups、医学控制器公共头文件 |
 | `CT_UI_MEDICAL_CORE_SOURCES` | 真实 `medicaldatacontroller.cpp` |
-| `CT_UI_COMPATIBILITY_CORE_SOURCES` | 兼容 `medicaldatacontroller_stub.cpp` |
 | `CT_UI_RENDERING_COMMON_SOURCES` | 稳定的 `medicalviewportitem.h` |
 | `CT_UI_MEDICAL_RENDERING_SOURCES` | VTK `medicalviewportitem.cpp` |
-| `CT_UI_COMPATIBILITY_RENDERING_SOURCES` | 无 VTK 的 `medicalviewportitem_stub.cpp` |
 | `CT_UI_QML_FILES` | 所有由 `qt_add_qml_module()` 打包的 QML 文件 |
 | `CT_UI_core` | 主程序和测试共享的静态核心库；医学模式下链接 ITK |
 | `CT_UI` | `main.cpp`、QML、渲染实现和 `CT_UI_core`；医学模式下链接 VTK |
@@ -312,7 +307,7 @@ QML 只通过 Qt 属性、信号和 `Q_INVOKABLE` 接口访问 C++。GUI 线程�
 
 1. 新的领域/控制器 C++ 文件加入对应的 `CT_UI_*_SOURCES` 集合。
 2. 新 QML 页面或组件必须加入 `CT_UI_QML_FILES`，否则不会被打包进程序。
-3. 真实后端与 stub 必须保持相同公共 API，使两个 preset 都能编译。
+3. 医学后端源码必须保持与公共 API 一致，并通过 MSVC 预设编译。
 4. 新测试放入 `tests/`；本地 DICOM 数据通过环境变量注入，不复制进仓库。
 5. 新三方依赖只在 `cmake/` 中声明，不在业务源码中写绝对库路径。
 

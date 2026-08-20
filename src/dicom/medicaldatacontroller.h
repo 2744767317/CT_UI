@@ -4,6 +4,7 @@
 #include <QString>
 #include <QUrl>
 #include <QVariantList>
+#include <QVariantMap>
 
 #include <array>
 #include <memory>
@@ -88,6 +89,7 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(QVariantList volumeNodes READ volumeNodes NOTIFY volumeNodesChanged)
     Q_PROPERTY(int selectedVolumeIndex READ selectedVolumeIndex NOTIFY volumeNodesChanged)
     Q_PROPERTY(bool activeVolumeVisible READ activeVolumeVisible NOTIFY volumeNodesChanged)
+    Q_PROPERTY(QVariantList operationHistory READ operationHistory NOTIFY operationHistoryChanged)
 
 public:
     explicit MedicalDataController(QObject *parent = nullptr);
@@ -140,6 +142,7 @@ public:
     QVariantList volumeNodes() const;
     int selectedVolumeIndex() const { return m_selectedVolumeIndex; }
     bool activeVolumeVisible() const;
+    QVariantList operationHistory() const { return m_operationHistory; }
 
     std::shared_ptr<const VolumeSnapshot> volumeSnapshot() const;
     std::shared_ptr<const VolumeSnapshot> projectionPairSnapshot() const;
@@ -156,6 +159,8 @@ public:
     Q_INVOKABLE bool removeVolume(int index);
     Q_INVOKABLE bool setVolumeVisibility(int index, bool visible);
     Q_INVOKABLE bool exportDicomCopy(const QUrl &destination);
+    Q_INVOKABLE bool exportCasePackage(const QUrl &destination,
+                                       const QVariantList &annotations);
     Q_INVOKABLE void loadDemoVolume();
     Q_INVOKABLE bool applyThreshold(double lower, double upper);
     Q_INVOKABLE void applyThresholdAsync(double lower, double upper);
@@ -171,6 +176,8 @@ public:
     Q_INVOKABLE double estimateDistanceMm(int viewType, double pixelDx, double pixelDy,
                                           double viewportWidth, double viewportHeight,
                                           bool pairedProjection = false) const;
+    // Update width and level together so interactive drags publish one render update.
+    Q_INVOKABLE void setWindowing(double width, double level);
 
 public slots:
     void setWindowWidth(double value);
@@ -186,6 +193,8 @@ signals:
     void seriesChoicesChanged();
     void selectedSeriesIndexChanged();
     void volumeNodesChanged();
+    void operationHistoryChanged();
+    void casePackageAnnotationsReady(const QVariantList &items);
 
 private:
     void setBusy(bool busy);
@@ -204,6 +213,8 @@ private:
     void activateVolumeNode(int index);
     void updateActiveVolumeNode();
     void clearActiveVolume();
+    void recordOperation(const QString &type, const QVariantMap &parameters = {});
+    bool prepareCasePackage(const QString &path, QString *scanPath);
 
     mutable std::mutex m_snapshotMutex;
     std::shared_ptr<VolumeSnapshot> m_volume;
@@ -250,4 +261,7 @@ private:
     int m_regionGrowingSeedValue = 0;
     bool m_regionGrowingSeedValid = false;
     bool m_busy = false;
+    QVariantList m_operationHistory;
+    QString m_pendingCasePackageRoot;
+    QVariantMap m_pendingCasePackage;
 };

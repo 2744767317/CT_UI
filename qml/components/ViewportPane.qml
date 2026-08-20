@@ -18,6 +18,7 @@ Rectangle {
     property bool showImage: true
     property bool showMeasurements: true
     property real segmentationOpacity: 0.72
+    property color segmentationColor: "#F0783C"
     property int rotationQuarterTurns: 0
     property bool flipHorizontal: false
     property bool flipVertical: false
@@ -228,12 +229,14 @@ Rectangle {
         showImage: root.showImage
         showSegmentation: root.showSegmentation
         segmentationOpacity: root.segmentationOpacity
+        segmentationColor: root.segmentationColor
         rotationQuarterTurns: root.rotationQuarterTurns
         flipHorizontal: root.flipHorizontal
         flipVertical: root.flipVertical
         cropMinimum: root.cropMinimum
         cropMaximum: root.cropMaximum
         showAnnotations: root.showMeasurements
+        renderEnabled: root.visible
         onVoxelPicked: (voxelX, voxelY, voxelZ, hu, normalizedX, normalizedY) => {
             if (root.draggingHandle && root.dragNodeId >= 0) {
                 annotationController.updateControlPointFromVoxel(
@@ -454,10 +457,11 @@ Rectangle {
             if (root.toolModeIndex === 1 && pressed) {
                 const dx = mouse.x - root.windowStart.x
                 const dy = mouse.y - root.windowStart.y
-                medicalData.windowWidth = Math.max(
-                    1, root.windowStartWidth * Math.exp(dx / Math.max(1, width) * 2.0))
-                medicalData.windowLevel = root.windowStartLevel
-                    - dy / Math.max(1, height) * root.windowStartWidth * 2.0
+                medicalData.setWindowing(
+                    Math.max(1, root.windowStartWidth
+                             * Math.exp(dx / Math.max(1, width) * 2.0)),
+                    root.windowStartLevel
+                    - dy / Math.max(1, height) * root.windowStartWidth * 2.0)
                 return
             }
             if (root.toolModeIndex === 2 && pressed) {
@@ -617,6 +621,9 @@ Rectangle {
 
     Slider {
         id: sliceSlider
+        // The full-viewport interaction MouseArea is intentionally above the
+        // image, but it must never steal the slice scrubber's pointer events.
+        z: 30
         visible: medicalData.volumeData && root.viewType !== MedicalViewport.Volume3D
         anchors.left: parent.left
         anchors.right: parent.right

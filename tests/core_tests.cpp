@@ -26,6 +26,7 @@ class CoreTests final : public QObject
 private slots:
     void workflowGuardsFutureSteps();
     void demoVolumeAndThresholdAreAvailable();
+    void windowingTransactionPublishesOnce();
     void asynchronousSegmentationPublishesStatistics();
     void volumeNodeLifecycle();
     void markupsMetricsAndEditing();
@@ -40,7 +41,9 @@ private slots:
     void dicomTextCharacterSetsAndDamagedLabels();
     void regionGrowingSeedStateAndValidation();
     void realDicomRoundTripWhenConfigured();
+    void casePackageRoundTripWhenConfigured();
     void recursiveLidcRootLoadsCtAndDx();
+    void realLidcRegionGrowingPerformance();
     void mixedRootLoadsUnsignedDx();
 };
 
@@ -137,6 +140,21 @@ void CoreTests::volumeNodeLifecycle()
     QVERIFY(!data.loaded());
     QVERIFY(data.volumeNodes().isEmpty());
     QCOMPARE(data.selectedVolumeIndex(), -1);
+}
+
+void CoreTests::windowingTransactionPublishesOnce()
+{
+    MedicalDataController data;
+    data.loadDemoVolume();
+    QSignalSpy windowingSpy(&data, &MedicalDataController::windowingChanged);
+
+    data.setWindowing(1500.0, -600.0);
+    QCOMPARE(data.windowWidth(), 1500.0);
+    QCOMPARE(data.windowLevel(), -600.0);
+    QCOMPARE(windowingSpy.count(), 1);
+
+    data.setWindowing(1500.0, -600.0);
+    QCOMPARE(windowingSpy.count(), 1);
 }
 
 void CoreTests::dicomTextCharacterSetsAndDamagedLabels()
@@ -555,6 +573,12 @@ void CoreTests::regionGrowingSeedStateAndValidation()
     QVERIFY(data.errorMessage().contains(QStringLiteral("45 HU")));
     QVERIFY(data.applyRegionGrowingFromSeed(40.0, 60.0));
     QVERIFY(data.segmentationAvailable());
+    const auto mask = data.maskSnapshot();
+    QVERIFY(mask);
+    QCOMPARE(static_cast<qint64>(std::count(mask->pixels.cbegin(), mask->pixels.cend(), 1)),
+             data.segmentationVoxelCount());
+    QVERIFY(std::all_of(mask->pixels.cbegin(), mask->pixels.cend(),
+                        [](unsigned char value) { return value <= 1; }));
 
     data.clearRegionGrowingSeed();
     QVERIFY(!data.regionGrowingSeedValid());
@@ -601,8 +625,12 @@ void CoreTests::recursiveLidcRootLoadsCtAndDx()
     MedicalDataController data;
     AnnotationController annotations;
     annotations.setMedicalData(&data);
+    QElapsedTimer scanTimer;
+    scanTimer.start();
     data.importDicomAsync(QUrl::fromLocalFile(root));
     QTRY_VERIFY_WITH_TIMEOUT(!data.busy(), 120000);
+    qInfo() << "Real LIDC scan:" << scanTimer.elapsed() << "ms for"
+            << data.seriesChoices().size() << "candidates";
     QVERIFY2(data.errorMessage().isEmpty(), qPrintable(data.errorMessage()));
     QVERIFY(data.seriesChoices().size() >= 3);
 
@@ -625,6 +653,7 @@ void CoreTests::recursiveLidcRootLoadsCtAndDx()
              "The asynchronous CT decode command blocked the caller.");
     QVERIFY(data.busy());
     QTRY_VERIFY_WITH_TIMEOUT(!data.busy(), 120000);
+    qInfo() << "Real LIDC CT pixel decode:" << dispatchTimer.elapsed() << "ms";
     QVERIFY2(data.errorMessage().isEmpty(), qPrintable(data.errorMessage()));
     QVERIFY(data.loaded());
     QVERIFY(data.volumeData());
@@ -665,6 +694,112 @@ void CoreTests::recursiveLidcRootLoadsCtAndDx()
 #endif
 }
 
+void CoreTests::casePackageRoundTripWhenConfigured()
+{
+#if CT_ENABLE_MEDICAL_BACKEND
+    const QString dicomDirectory = qEnvironmentVariable("CT_UI_TEST_DICOM_DIR");
+    if (dicomDirectory.isEmpty())
+        QSKIP("Set CT_UI_TEST_DICOM_DIR to run the case-package integration test.");
+
+    MedicalDataController source;
+    AnnotationController sourceAnnotations;
+    sourceAnnotations.setMedicalData(&source);
+    QVERIFY2(source.importDicom(QUrl::fromLocalFile(dicomDirectory)),
+             qPrintable(source.errorMessage()));
+    if (!source.loaded()) {
+        int ctIndex = -1;
+        for (const QVariant &entry : source.seriesChoices()) {
+            const QVariantMap choice = entry.toMap();
+            if (choice.value(QStringLiteral("modality")).toString() == QStringLiteral("CT")) {
+                ctIndex = choice.value(QStringLiteral("index")).toInt();
+                break;
+            }
+        }
+        QVERIFY(ctIndex >= 0);
+        QVERIFY2(source.selectSeries(ctIndex), qPrintable(source.errorMessage()));
+    }
+    QVERIFY(source.volumeData());
+    const auto volume = source.volumeSnapshot();
+    QVERIFY(volume);
+    QVERIFY2(source.applyThreshold(-1000.0, 500.0), qPrintable(source.errorMessage()));
+    const qint64 sourceVoxelCount = source.segmentationVoxelCount();
+    QVERIFY(sourceVoxelCount > 0);
+    sourceAnnotations.setToolType(AnnotationController::LengthTool);
+    QVERIFY(sourceAnnotations.addWorldPoint(0.0, 0.0, 0.0));
+    QVERIFY(sourceAnnotations.addWorldPoint(10.0, 0.0, 0.0));
+    QCOMPARE(sourceAnnotations.measureCount(), 1);
+
+    QTemporaryDir exportRoot;
+    QVERIFY(exportRoot.isValid());
+    QVERIFY2(source.exportCasePackage(QUrl::fromLocalFile(exportRoot.path()),
+                                      sourceAnnotations.items()),
+             qPrintable(source.errorMessage()));
+    const QFileInfoList packages = QDir(exportRoot.path()).entryInfoList(
+        QDir::Dirs | QDir::NoDotAndDotDot);
+    QCOMPARE(packages.size(), 1);
+    const QDir package(packages.front().absoluteFilePath());
+    QVERIFY(QFileInfo::exists(package.filePath(QStringLiteral("case.json"))));
+    QVERIFY(QFileInfo::exists(package.filePath(QStringLiteral("segmentation/mask.raw"))));
+    QVERIFY(!QDir(package.filePath(QStringLiteral("dicom"))).entryList(
+        QDir::Files | QDir::NoDotAndDotDot).isEmpty());
+
+    MedicalDataController restored;
+    AnnotationController restoredAnnotations;
+    restoredAnnotations.setMedicalData(&restored);
+    QVERIFY2(restored.importDicom(QUrl::fromLocalFile(package.absolutePath())),
+             qPrintable(restored.errorMessage()));
+    QVERIFY(restored.loaded());
+    QVERIFY(restored.segmentationAvailable());
+    QCOMPARE(restored.segmentationVoxelCount(), sourceVoxelCount);
+    QCOMPARE(restoredAnnotations.measureCount(), 1);
+    QVERIFY(!restored.operationHistory().isEmpty());
+#else
+    QSKIP("The medical backend is required for case-package integration.");
+#endif
+}
+
+void CoreTests::realLidcRegionGrowingPerformance()
+{
+#if CT_ENABLE_MEDICAL_BACKEND
+    const QString root = qEnvironmentVariable("CT_UI_TEST_LIDC_ROOT");
+    if (root.isEmpty())
+        QSKIP("Set CT_UI_TEST_LIDC_ROOT to benchmark region growing on real CT data.");
+
+    MedicalDataController data;
+    QVERIFY2(data.importDicom(QUrl::fromLocalFile(root)), qPrintable(data.errorMessage()));
+    int ctIndex = -1;
+    for (const QVariant &entry : data.seriesChoices()) {
+        const QVariantMap choice = entry.toMap();
+        if (choice.value(QStringLiteral("modality")) == QStringLiteral("CT")) {
+            ctIndex = choice.value(QStringLiteral("index")).toInt();
+            break;
+        }
+    }
+    QVERIFY(ctIndex >= 0);
+    QVERIFY2(data.selectSeries(ctIndex), qPrintable(data.errorMessage()));
+    const auto volume = data.volumeSnapshot();
+    QVERIFY(volume);
+
+    const int seedX = std::min(148, volume->dimensions[0] - 1);
+    const int seedY = std::min(229, volume->dimensions[1] - 1);
+    const int seedZ = std::min(43, volume->dimensions[2] - 1);
+    QVERIFY(data.setRegionGrowingSeed(seedX, seedY, seedZ));
+    const int seedValue = data.regionGrowingSeedValue();
+    QElapsedTimer timer;
+    timer.start();
+    QVERIFY2(data.applyRegionGrowing(seedX, seedY, seedZ,
+                                     seedValue - 100, seedValue + 100, true),
+             qPrintable(data.errorMessage()));
+    const qint64 elapsedMs = timer.elapsed();
+    qInfo() << "Real LIDC 26-neighbour region growing:" << elapsedMs << "ms for"
+            << data.segmentationVoxelCount() << "voxels";
+    QVERIFY2(elapsedMs < 15000, "Region growing exceeded the interactive response budget.");
+    QVERIFY(data.segmentationVoxelCount() > 0);
+#else
+    QSKIP("The MinGW UI compatibility build does not link the medical backend.");
+#endif
+}
+
 void CoreTests::mixedRootLoadsUnsignedDx()
 {
 #if CT_ENABLE_MEDICAL_BACKEND
@@ -675,6 +810,31 @@ void CoreTests::mixedRootLoadsUnsignedDx()
     MedicalDataController data;
     QVERIFY2(data.importDicom(QUrl::fromLocalFile(root)), qPrintable(data.errorMessage()));
     QVERIFY(data.seriesChoices().size() >= 14);
+
+    for (const QVariant &entry : data.seriesChoices()) {
+        const QVariantMap choice = entry.toMap();
+        qInfo().noquote() << QStringLiteral("X-ray root candidate %1: %2 / %3 / %4 / %5")
+                                .arg(choice.value(QStringLiteral("index")).toInt())
+                                .arg(choice.value(QStringLiteral("patientId")).toString())
+                                .arg(choice.value(QStringLiteral("modality")).toString())
+                                .arg(choice.value(QStringLiteral("description")).toString())
+                                .arg(choice.value(QStringLiteral("dimensions")).toString());
+    }
+
+    int splitSpineSeriesCount = 0;
+    for (const QVariant &entry : data.seriesChoices()) {
+        const QVariantMap choice = entry.toMap();
+        if (choice.value(QStringLiteral("modality")).toString() != QStringLiteral("CT")
+            || choice.value(QStringLiteral("description")).toString()
+                   != QStringLiteral("Spine 2.0"))
+            continue;
+        const int index = choice.value(QStringLiteral("index")).toInt();
+        QVERIFY2(data.selectSeries(index), qPrintable(data.errorMessage()));
+        ++splitSpineSeriesCount;
+    }
+    // Both patients contain a Series UID with mixed matrices.  The scanner
+    // must expose each homogeneous matrix as a separately loadable candidate.
+    QCOMPARE(splitSpineSeriesCount, 4);
 
     int dxIndex = -1;
     bool damagedLabelSampleFound = false;

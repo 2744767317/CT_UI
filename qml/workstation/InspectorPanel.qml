@@ -12,6 +12,7 @@ Rectangle {
     property bool seedPicking: false
     property real cropMinimum: 0.0
     property real cropMaximum: 1.0
+    property color segmentationColor: "#F0783C"
     property int rotationQuarterTurns: 0
     property bool flipHorizontal: false
     property bool flipVertical: false
@@ -24,11 +25,32 @@ Rectangle {
     signal volumePresetRequested(int preset)
     signal seedPickingRequested(bool enabled)
     signal segmentationVisibilityRequested(bool visible)
+    signal segmentationColorRequested(color color)
     signal cropRequested(real minimum, real maximum)
     signal rotationRequested(int turns)
     signal flipHorizontalRequested(bool flipped)
     signal flipVerticalRequested(bool flipped)
     signal requestExport()
+
+    function applySegmentationPreset(index) {
+        const presets = [
+            ["", "", "#F0783C"],
+            ["150", "2500", "#F2C078"],
+            ["-150", "250", "#E27D60"],
+            ["-1000", "-400", "#55B7D9"],
+            ["100", "500", "#D85C8B"]
+        ]
+        const preset = presets[index]
+        if (!preset)
+            return
+        if (preset[0].length > 0) {
+            thresholdLow.text = preset[0]
+            thresholdHigh.text = preset[1]
+            growLow.text = preset[0]
+            growHigh.text = preset[1]
+        }
+        root.segmentationColorRequested(preset[2])
+    }
     color: Theme.panel
     border.color: Theme.border
 
@@ -90,7 +112,7 @@ Rectangle {
                         from: 1
                         to: root.ctMode ? 6000 : 65535
                         value: medicalData.windowWidth
-                        onMoved: medicalData.windowWidth = value
+                        onMoved: medicalData.setWindowing(value, medicalData.windowLevel)
                     }
                     Text { text: "窗位  " + Math.round(medicalData.displayWindowLevel); color: Theme.textSecondary; font.pixelSize: 13 }
                     Slider {
@@ -98,7 +120,9 @@ Rectangle {
                         from: root.ctMode ? -2000 : (medicalData.projectionUnsigned ? 0 : -32768)
                         to: root.ctMode ? 3000 : (medicalData.projectionUnsigned ? 65535 : 32767)
                         value: medicalData.displayWindowLevel
-                        onMoved: medicalData.windowLevel = value - (root.ctMode || !medicalData.projectionUnsigned ? 0 : 32768)
+                        onMoved: medicalData.setWindowing(
+                                     medicalData.windowWidth,
+                                     value - (root.ctMode || !medicalData.projectionUnsigned ? 0 : 32768))
                     }
                     Text { text: "预设"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
                     ComboBox {
@@ -108,13 +132,16 @@ Rectangle {
                             : ["全动态范围  W65535 / L32767", "高对比  W16000 / L32767", "低对比  W32000 / L16384"]
                         onActivated: index => {
                             if (root.ctMode) {
-                                if (index === 0) { medicalData.windowWidth = 400; medicalData.windowLevel = 40 }
-                                if (index === 1) { medicalData.windowWidth = 1500; medicalData.windowLevel = -600 }
-                                if (index === 2) { medicalData.windowWidth = 1800; medicalData.windowLevel = 400 }
+                                if (index === 0) medicalData.setWindowing(400, 40)
+                                if (index === 1) medicalData.setWindowing(1500, -600)
+                                if (index === 2) medicalData.setWindowing(1800, 400)
                             } else {
-                                if (index === 0) { medicalData.windowWidth = 65535; medicalData.windowLevel = 32767 - (medicalData.projectionUnsigned ? 32768 : 0) }
-                                if (index === 1) { medicalData.windowWidth = 16000; medicalData.windowLevel = 32767 - (medicalData.projectionUnsigned ? 32768 : 0) }
-                                if (index === 2) { medicalData.windowWidth = 32000; medicalData.windowLevel = 16384 - (medicalData.projectionUnsigned ? 32768 : 0) }
+                                if (index === 0) medicalData.setWindowing(
+                                                    65535, 32767 - (medicalData.projectionUnsigned ? 32768 : 0))
+                                if (index === 1) medicalData.setWindowing(
+                                                    16000, 32767 - (medicalData.projectionUnsigned ? 32768 : 0))
+                                if (index === 2) medicalData.setWindowing(
+                                                    32000, 16384 - (medicalData.projectionUnsigned ? 32768 : 0))
                             }
                         }
                     }
@@ -174,6 +201,18 @@ Rectangle {
                     width: parent.width
                     spacing: 10
                     Text { text: "分割方法"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+                    ComboBox {
+                        Layout.fillWidth: true
+                        model: ["自定义", "骨骼", "软组织", "肺部", "血管 / 增强"]
+                        onActivated: index => root.applySegmentationPreset(index)
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "组织预设会同步阈值/种子生长范围，并设置对应分割颜色；仍可手动微调 HU。"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
                     ComboBox {
                         id: segmentationMethod
                         Layout.fillWidth: true
@@ -305,6 +344,15 @@ Rectangle {
                         font.pixelSize: 12
                         wrapMode: Text.WordWrap
                     }
+                    Text { text: "分割显示颜色"; color: Theme.text; font.pixelSize: 13; font.weight: Font.DemiBold }
+                    ComboBox {
+                        Layout.fillWidth: true
+                        model: ["橙色", "骨骼米色", "软组织红", "肺部蓝", "血管玫红"]
+                        onActivated: {
+                            const colors = ["#F0783C", "#F2C078", "#E27D60", "#55B7D9", "#D85C8B"]
+                            root.segmentationColorRequested(colors[index])
+                        }
+                    }
                 }
             }
 
@@ -325,7 +373,7 @@ Rectangle {
                     Text { text: "体绘制预设"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
                     ComboBox {
                         Layout.fillWidth: true
-                        model: ["胸部增强", "骨骼", "肺部", "软组织"]
+                        model: ["胸部增强", "骨骼", "肺部", "软组织", "血管 / 增强"]
                         currentIndex: root.volumePreset
                         enabled: !root.mip
                         onActivated: index => root.volumePresetRequested(index)
@@ -376,15 +424,22 @@ Rectangle {
 
             ColumnLayout {
                 spacing: 10
-                Text { text: "DICOM 导出"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+                Text { text: "病例包导出"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
                 Text {
                     Layout.fillWidth: true
-                    text: "当前阶段导出经过完整性核对的原始 DICOM 实例副本，不修改患者标签或像素数据。"
+                    text: "导出独立病例文件夹：原始 DICOM、三维分割掩膜、测量/标注、窗宽窗位和关键操作记录。再次导入此文件夹可恢复工作区。"
                     color: Theme.textSecondary
                     font.pixelSize: 13
                     wrapMode: Text.WordWrap
                 }
-                ActionButton { text: "导出 DICOM 副本"; primary: true; Layout.fillWidth: true; enabled: medicalData.loaded; onClicked: root.requestExport() }
+                Text {
+                    Layout.fillWidth: true
+                    text: "当前为软件病例包，不是 DICOM SEG/SR；不得作为临床互操作或诊断归档使用。"
+                    color: Theme.accent
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                }
+                ActionButton { text: "导出病例包"; primary: true; Layout.fillWidth: true; enabled: medicalData.loaded; onClicked: root.requestExport() }
                 Item { Layout.fillHeight: true }
             }
         }

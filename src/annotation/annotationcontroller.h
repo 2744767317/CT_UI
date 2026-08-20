@@ -78,6 +78,9 @@ public:
     /// 任意数据集的计数（供数据集列表行显示）。
     Q_INVOKABLE int markCountFor(const QString &volumeId) const;
     Q_INVOKABLE int measureCountFor(const QString &volumeId) const;
+    // A portable case package restores committed markups only; unfinished
+    // interactive geometry is intentionally not persisted.
+    Q_INVOKABLE bool restoreCaseAnnotations(const QVariantList &items);
 
 public slots:
     void onMedicalDataChanged();

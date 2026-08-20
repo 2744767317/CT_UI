@@ -71,6 +71,8 @@ void AnnotationController::setMedicalData(MedicalDataController *data)
                 this, &AnnotationController::onMedicalDataChanged);
         connect(m_medicalData, &MedicalDataController::volumeNodesChanged,
                 this, [this]() { rebindActiveScene(); emitSceneChanged(); });
+        connect(m_medicalData, &MedicalDataController::casePackageAnnotationsReady,
+                this, &AnnotationController::restoreCaseAnnotations);
     }
     m_scenes.clear();
     m_activeVolumeId.clear();
@@ -286,4 +288,12 @@ void AnnotationController::rebindActiveScene()
     m_scene.setVisible(visible);
     m_activeVolumeId = activeId;
     m_lastRevision = -1;
+}
+
+bool AnnotationController::restoreCaseAnnotations(const QVariantList &items)
+{
+    if (!m_scene.restoreItems(items))
+        return false;
+    emitSceneChanged();
+    return true;
 }

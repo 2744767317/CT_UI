@@ -53,7 +53,7 @@ QML 是视图，不负责保存大块医学像素、运行分割算法或创建 
 - 管理多个 `LoadedVolumeNode`；
 - 调用 ITK 阈值和 Connected Threshold 分割；
 - 管理窗宽窗位、分割和种子状态；
-- 导出原始 DICOM 实例副本。
+- 导出并重载病例包：原始 DICOM、三维分割掩膜、测量标注、显示状态和操作记录。
 
 这个目录名称沿用当前实现，但职责已经超过纯 DICOM IO。后续算法和持久化继续增长时，建议按行为拆为 `medical/io`、`medical/scene`、`medical/algorithms`，并保持 `MedicalDataController` 只做编排。本轮不搬动已验证实现，避免无功能收益的大规模路径变更。
 
@@ -142,23 +142,19 @@ VTK 图像数组同样只读引用 `VolumeSnapshot`/`MaskSnapshot`，每个 `Vie
 
 DX/CR 是 DICOM 封装的二维投摄影像；CT 是按空间位置组成的三维切片序列。二者文件格式相同，但采集几何和可视化语义不同，因此工作站布局不同。
 
-## 6. MSVC 与 MinGW 两种实现
+## 6. MSVC 医学后端基线
 
-公共头文件和 QML API 在两种构建中保持一致：
+项目只有一条受支持的构建链路：
 
 ```text
-MSVC + CT_ENABLE_MEDICAL_BACKEND=ON
+Windows x64 + MSVC v143
   medicaldatacontroller.cpp
   medicalviewportitem.cpp
-  VTK / ITK / DICOM
-
-MinGW + CT_ENABLE_MEDICAL_BACKEND=OFF
-  medicaldatacontroller_stub.cpp
-  medicalviewportitem_stub.cpp
-  仅 UI 兼容验证
+  GDCM / ITK / VTK
 ```
 
-选择发生在 `cmake/SourceFiles.cmake` 和根 `CMakeLists.txt`，不是运行时动态切换。兼容桩必须维持与真实实现相同的 QML 属性和命令，以便 UI 不分叉。
+根 `CMakeLists.txt` 会拒绝 MinGW、Clang 或关闭医学后端的配置。这样可以避免
+不同 ABI 的 Qt、VTK、ITK、RTK 和 CUDA 混用，也让测试结果与正式工作站保持一致。
 
 ## 7. 新功能应放在哪里
 

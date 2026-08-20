@@ -237,6 +237,26 @@ void MedicalViewportItem::resetView()
     update();
 }
 
+void MedicalViewportItem::setSegmentationColor(const QColor &color)
+{
+    const QColor normalized = color.isValid() ? color : QColor(QStringLiteral("#F0783C"));
+    if (m_segmentationColor == normalized)
+        return;
+    m_segmentationColor = normalized;
+    emit segmentationColorChanged();
+    update();
+}
+
+void MedicalViewportItem::setRenderEnabled(bool enabled)
+{
+    if (m_renderEnabled == enabled)
+        return;
+    m_renderEnabled = enabled;
+    emit renderEnabledChanged();
+    if (m_renderEnabled)
+        reloadData();
+}
+
 void MedicalViewportItem::pickVoxel(double itemX, double itemY, bool updateSeed)
 {
     mapClickToVoxel(itemX, itemY, updateSeed);
@@ -251,6 +271,21 @@ void MedicalViewportItem::reloadData()
 }
 
 void MedicalViewportItem::updateRenderState()
+{
+    update();
+}
+
+void MedicalViewportItem::updateCropState()
+{
+    update();
+}
+
+void MedicalViewportItem::updateSliceState()
+{
+    update();
+}
+
+void MedicalViewportItem::updateSliceCameraState()
 {
     update();
 }

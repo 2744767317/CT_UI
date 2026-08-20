@@ -11,7 +11,7 @@ ApplicationWindow {
     minimumWidth: 1440
     minimumHeight: 820
     visible: true
-    title: "光索科技 CT 影像工作站"
+    title: "基于正交投影的超低剂量全身骨骼二维三维成像系统"
     color: Theme.app
     palette.window: Theme.app
     palette.windowText: Theme.text
@@ -42,8 +42,8 @@ ApplicationWindow {
     }
     FolderDialog {
         id: exportFolderDialog
-        title: "选择 DICOM 副本导出目录"
-        onAccepted: medicalData.exportDicomCopy(selectedFolder)
+        title: "选择病例包导出目录"
+        onAccepted: medicalData.exportCasePackage(selectedFolder, annotationController.items)
     }
 
     SeriesSelectionDialog { id: seriesDialog }
@@ -51,6 +51,15 @@ ApplicationWindow {
         target: medicalData
         function onSeriesChoicesChanged() {
             if (medicalData.seriesChoices.length > 1 && medicalData.selectedSeriesIndex < 0)
+                Qt.callLater(function() { seriesDialog.open() })
+        }
+        function onStatusChanged() {
+            // A failed decode must not strand the user on an empty workstation.
+            // The scanned candidates stay valid, so reopen the selector and let
+            // the user choose another matrix/series immediately.
+            if (medicalData.errorMessage.length > 0
+                    && medicalData.seriesChoices.length > 1
+                    && medicalData.selectedSeriesIndex < 0)
                 Qt.callLater(function() { seriesDialog.open() })
         }
     }
@@ -61,7 +70,7 @@ ApplicationWindow {
 
         Rectangle {
             Layout.fillWidth: true
-            height: 68
+            height: 76
             color: Theme.panelRaised
             border.color: Theme.border
 
@@ -72,9 +81,22 @@ ApplicationWindow {
                 spacing: 18
 
                 ColumnLayout {
+                    Layout.preferredWidth: 370
+                    Layout.minimumWidth: 370
                     spacing: 0
-                    Text { text: "光索科技"; color: Theme.text; font.pixelSize: 22; font.weight: Font.Bold }
-                    Text { text: "CT 影像与三维工作站"; color: Theme.textSecondary; font.pixelSize: 12 }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "基于正交投影的超低剂量全身骨骼二维三维成像系统"
+                        color: Theme.text
+                        font.pixelSize: 15
+                        font.weight: Font.Bold
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        text: "光索科技"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                    }
                 }
 
                 Rectangle { width: 1; Layout.fillHeight: true; Layout.topMargin: 12; Layout.bottomMargin: 12; color: Theme.border }

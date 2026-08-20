@@ -43,10 +43,65 @@ Rectangle {
 
         Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
         Text { text: "数据集"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+        Text {
+            visible: medicalData.seriesChoices.length > 0
+            text: "已发现序列（点击载入）"
+            color: Theme.textSecondary
+            font.pixelSize: 12
+        }
+        ListView {
+            id: seriesList
+            visible: medicalData.seriesChoices.length > 0
+            Layout.fillWidth: true
+            Layout.preferredHeight: Math.min(78, Math.max(40, medicalData.seriesChoices.length * 38))
+            clip: true
+            spacing: 2
+            model: medicalData.seriesChoices
+            delegate: Rectangle {
+                required property var modelData
+                required property int index
+                width: ListView.view.width
+                height: 36
+                color: modelData.index === medicalData.selectedSeriesIndex
+                       ? Theme.control : "transparent"
+                border.color: modelData.index === medicalData.selectedSeriesIndex
+                              ? Theme.accent : Theme.border
+                radius: 2
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 7
+                    anchors.rightMargin: 7
+                    spacing: 6
+                    Text {
+                        text: modelData.modality
+                        color: modelData.modality === "CT" ? Theme.volume : Theme.accent
+                        font.pixelSize: 11
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: modelData.description + " · " + modelData.dimensions
+                        color: Theme.text
+                        font.pixelSize: 11
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        text: modelData.instanceCount
+                        color: Theme.textMuted
+                        font.pixelSize: 10
+                    }
+                }
+                TapHandler {
+                    enabled: !medicalData.busy
+                    onTapped: medicalData.selectSeriesAsync(modelData.index)
+                }
+            }
+            ScrollBar.vertical: ScrollBar {}
+        }
         ListView {
             id: volumeList
             Layout.fillWidth: true
-            Layout.preferredHeight: 168
+            Layout.preferredHeight: 126
             clip: true
             spacing: 3
             model: medicalData.volumeNodes

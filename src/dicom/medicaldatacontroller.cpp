@@ -5,10 +5,16 @@
 
 #include <QDir>
 #include <QDirIterator>
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
 #include <QSet>
+#include <QRegularExpression>
 #include <QThread>
 #include <QVariantMap>
 #include <QFutureWatcher>
@@ -16,12 +22,14 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <itkBinaryThresholdImageFilter.h>
-#include <itkConnectedThresholdImageFilter.h>
 #include <itkGDCMImageIO.h>
 #include <itkImage.h>
 #include <itkImageFileReader.h>
 #include <itkImageSeriesReader.h>
 #include <itkMetaDataObject.h>
+
+#include <gdcmScanner.h>
+#include <gdcmTag.h>
 
 #include <algorithm>
 #include <cmath>
@@ -100,6 +108,7 @@ struct LoadedVolumeNode
     std::shared_ptr<MaskSnapshot> mask;
     double windowWidth = 400.0;
     double windowLevel = 40.0;
+    QVariantList operationHistory;
     QString segmentationMethod;
     qint64 segmentationVoxelCount = 0;
     double segmentationVolumeMl = 0.0;
@@ -128,6 +137,12 @@ struct SegmentationResult
     double selectedVolumeMl = 0.0;
     QString method;
     QString error;
+    double lower = 0.0;
+    double upper = 0.0;
+    int seedX = -1;
+    int seedY = -1;
+    int seedZ = -1;
+    bool fullyConnected = false;
 };
 
 namespace {
@@ -288,6 +303,67 @@ DicomScanResult scanDicomDirectory(const QString &path)
             candidateFiles.append(path);
         }
 
+        // GDCM Scanner reads only the requested header tags in one pass. The
+        // previous implementation instantiated ITK ImageIO and parsed the
+        // complete image header for every slice, which made mixed roots such
+        // as X_TEST take over a minute to discover.
+        gdcm::Directory::FilenamesType scannerFiles;
+        scannerFiles.reserve(candidateFiles.size());
+        for (const QString &filePath : candidateFiles) {
+            const QFileInfo fileInfo(filePath);
+            const QString suffix = fileInfo.suffix().toLower();
+            const QString fileName = fileInfo.fileName().toUpper();
+            if (fileInfo.size() >= 132 && suffix != QStringLiteral("zip")
+                && suffix != QStringLiteral("xml")
+                && fileName != QStringLiteral("DICOMDIR")
+                && fileName != QStringLiteral("LOCKFILE")
+                && fileName != QStringLiteral("VERSION"))
+                scannerFiles.push_back(QDir::toNativeSeparators(filePath).toStdString());
+        }
+        gdcm::Scanner scanner;
+        const auto addTag = [&scanner](uint16_t group, uint16_t element) {
+            scanner.AddTag(gdcm::Tag(group, element));
+        };
+        for (const auto tag : {
+                 std::pair<uint16_t, uint16_t>{0x0008, 0x0005},
+                 {0x0008, 0x0008}, {0x0008, 0x0016}, {0x0008, 0x0018},
+                 {0x0008, 0x0020}, {0x0008, 0x0021}, {0x0008, 0x0032},
+                 {0x0008, 0x0060}, {0x0008, 0x1030}, {0x0008, 0x103e},
+                 {0x0010, 0x0010}, {0x0010, 0x0020}, {0x0010, 0x0030},
+                 {0x0010, 0x0040}, {0x0020, 0x000d}, {0x0020, 0x000e},
+                 {0x0020, 0x0013}, {0x0020, 0x0020}, {0x0020, 0x0032},
+                 {0x0028, 0x0004}, {0x0028, 0x0008}, {0x0028, 0x0010},
+                 {0x0028, 0x0011}, {0x0028, 0x0100}, {0x0028, 0x0103},
+                 {0x0028, 0x1050},
+                 {0x0028, 0x1051}, {0x2050, 0x0020}})
+            addTag(tag.first, tag.second);
+        if (!scanner.Scan(scannerFiles))
+            throw std::runtime_error("No readable DICOM image instances found recursively");
+
+        const auto scanned = [&scanner](const std::string &file, uint16_t group,
+                                        uint16_t element) {
+            const char *value = scanner.GetValue(file.c_str(), gdcm::Tag(group, element));
+            return value ? std::string(value) : std::string();
+        };
+        const auto scannedText = [&scanned](const std::string &file, uint16_t group,
+                                            uint16_t element, const QString &characterSet) {
+            return DicomTextCodec::decode(scanned(file, group, element), characterSet);
+        };
+        const auto scannedInt = [&scanned](const std::string &file, uint16_t group,
+                                           uint16_t element, int fallback) {
+            bool ok = false;
+            const int value = QString::fromLatin1(scanned(file, group, element).data()).toInt(&ok);
+            return ok ? value : fallback;
+        };
+        const auto scannedNumber = [&scanned](const std::string &file, uint16_t group,
+                                              uint16_t element,
+                                              double fallback) {
+            bool ok = false;
+            const double value = QString::fromLatin1(scanned(file, group, element).data())
+                                     .section(QChar(u'\\'), 0, 0).toDouble(&ok);
+            return ok ? value : fallback;
+        };
+
         // CT 按 Series Instance UID 聚合为体数据；DX/CR 等投影按 SOP Instance
         // 分开，防止把正位和侧位错误堆叠成三维 Volume。
         QHash<QString, std::shared_ptr<DicomSeriesCandidate>> groupedSeries;
@@ -302,31 +378,39 @@ DicomScanResult scanDicomDirectory(const QString &path)
             }
 
             try {
-                auto probe = itk::GDCMImageIO::New();
                 const std::string nativeFile = QDir::toNativeSeparators(filePath).toStdString();
-                if (!probe->CanReadFile(nativeFile.c_str()))
+                if (!scanner.IsKey(nativeFile.c_str()))
                     continue;
-                probe->SetFileName(nativeFile);
-                probe->ReadImageInformation();
-                if (probe->GetNumberOfDimensions() < 2 || probe->GetDimensions(0) == 0
-                    || probe->GetDimensions(1) == 0) {
-                    continue;
-                }
-
-                const auto &dictionary = probe->GetMetaDataDictionary();
-                const QString modality = dicomText(dictionary, "0008|0060").toUpper();
+                const QString characterSet = QString::fromLatin1(
+                    scanned(nativeFile, 0x0008, 0x0005).data()).trimmed();
+                const QString modality = scannedText(nativeFile, 0x0008, 0x0060,
+                                                     characterSet).toUpper();
                 if (modality.isEmpty())
                     continue;
 
-                const QString patientId = dicomText(dictionary, "0010|0020");
-                const QString studyUid = dicomText(dictionary, "0020|000d");
-                QString seriesUid = dicomText(dictionary, "0020|000e");
+                const QString patientId = scannedText(nativeFile, 0x0010, 0x0020, characterSet);
+                const QString studyUid = scannedText(nativeFile, 0x0020, 0x000d, characterSet);
+                QString seriesUid = scannedText(nativeFile, 0x0020, 0x000e, characterSet);
                 if (seriesUid.isEmpty())
                     seriesUid = fileInfo.absolutePath();
                 const bool projection = isProjectionModality(modality);
+                const int columns = scannedInt(nativeFile, 0x0028, 0x0011, 0);
+                const int rows = scannedInt(nativeFile, 0x0028, 0x0010, 0);
+                const int frames = std::max(1, scannedInt(nativeFile, 0x0028, 0x0008, 1));
+                const int bitsAllocated = scannedInt(nativeFile, 0x0028, 0x0100, 0);
+                const int pixelRepresentation = scannedInt(nativeFile, 0x0028, 0x0103, 0);
                 QString groupKey = patientId + QChar(u'|') + studyUid + QChar(u'|') + seriesUid;
+                // A few scanners reuse one Series UID for scout/localizer images
+                // with different matrices.  Such files are not one volume and
+                // ImageSeriesReader rejects the mixed stack.  Split candidates
+                // before decoding so every candidate is internally homogeneous.
+                if (!projection) {
+                    groupKey += QStringLiteral("|matrix=%1x%2x%3|bits=%4|repr=%5")
+                                    .arg(columns).arg(rows).arg(frames)
+                                    .arg(bitsAllocated).arg(pixelRepresentation);
+                }
                 if (projection) {
-                    QString sopUid = dicomText(dictionary, "0008|0018");
+                    QString sopUid = scannedText(nativeFile, 0x0008, 0x0018, characterSet);
                     if (sopUid.isEmpty())
                         sopUid = filePath;
                     groupKey += QChar(u'|') + sopUid;
@@ -335,21 +419,31 @@ DicomScanResult scanDicomDirectory(const QString &path)
                 auto candidate = groupedSeries.value(groupKey);
                 if (!candidate) {
                     candidate = std::make_shared<DicomSeriesCandidate>();
-                    candidate->patientName = dicomDisplayText(dictionary, "0010|0010")
+                    candidate->patientName = scannedText(nativeFile, 0x0010, 0x0010,
+                                                         characterSet)
                                                  .replace(QChar(u'^'), QChar(u' '));
                     candidate->patientId = patientId;
-                    candidate->patientSex = dicomText(dictionary, "0010|0040");
-                    candidate->patientBirthDate = dicomText(dictionary, "0010|0030");
-                    candidate->studyDescription = dicomDisplayText(dictionary, "0008|1030");
-                    candidate->studyDate = dicomText(dictionary, "0008|0020");
+                    candidate->patientSex = scannedText(nativeFile, 0x0010, 0x0040, characterSet);
+                    candidate->patientBirthDate = scannedText(nativeFile, 0x0010, 0x0030,
+                                                              characterSet);
+                    candidate->studyDescription = scannedText(nativeFile, 0x0008, 0x1030,
+                                                              characterSet);
+                    if (!DicomTextCodec::isUsableDisplayText(candidate->studyDescription))
+                        candidate->studyDescription.clear();
+                    candidate->studyDate = scannedText(nativeFile, 0x0008, 0x0020, characterSet);
                     candidate->studyUid = studyUid;
-                    candidate->seriesDescription = dicomDisplayText(dictionary, "0008|103e");
+                    candidate->seriesDescription = scannedText(nativeFile, 0x0008, 0x103e,
+                                                               characterSet);
+                    if (!DicomTextCodec::isUsableDisplayText(candidate->seriesDescription))
+                        candidate->seriesDescription.clear();
                     candidate->seriesUid = seriesUid;
                     candidate->modality = modality;
-                    candidate->sopClassUid = dicomText(dictionary, "0008|0016");
+                    candidate->sopClassUid = scannedText(nativeFile, 0x0008, 0x0016,
+                                                         characterSet);
                     candidate->sopClassName = sopClassLabel(candidate->sopClassUid);
-                    candidate->imageType = dicomText(dictionary, "0008|0008");
-                    candidate->patientOrientation = dicomText(dictionary, "0020|0020");
+                    candidate->imageType = scannedText(nativeFile, 0x0008, 0x0008, characterSet);
+                    candidate->patientOrientation = scannedText(nativeFile, 0x0020, 0x0020,
+                                                                 characterSet);
                     candidate->projectionViewKey = projection
                         ? projectionViewKeyFor(candidate->imageType,
                                                candidate->patientOrientation)
@@ -359,25 +453,33 @@ DicomScanResult scanDicomDirectory(const QString &path)
                     // Keep projection scalars unchanged; the renderer applies this
                     // display polarity after the stored-value/window-level pipeline.
                     candidate->inverted = DicomPresentation::grayscaleInverted(
-                        dicomText(dictionary, "0028|0004"),
-                        dicomText(dictionary, "2050|0020"));
+                        scannedText(nativeFile, 0x0028, 0x0004, characterSet),
+                        scannedText(nativeFile, 0x2050, 0x0020, characterSet));
                     candidate->projectionVariant = candidate->imageType.toUpper().contains(
                         QStringLiteral("DERIVED")) ? QStringLiteral("derived")
                                                      : QStringLiteral("original");
-                    candidate->windowWidth = dicomNumber(dictionary, "0028|1051", 0.0);
-                    candidate->windowLevel = dicomNumber(dictionary, "0028|1050", 0.0);
-                    candidate->columns = static_cast<int>(probe->GetDimensions(0));
-                    candidate->rows = static_cast<int>(probe->GetDimensions(1));
-                    candidate->frames = probe->GetNumberOfDimensions() >= 3
-                        ? static_cast<int>(probe->GetDimensions(2)) : 1;
+                    candidate->windowWidth = scannedNumber(nativeFile, 0x0028, 0x1051, 0.0);
+                    candidate->windowLevel = scannedNumber(nativeFile, 0x0028, 0x1050, 0.0);
+                    candidate->columns = columns;
+                    candidate->rows = rows;
+                    candidate->frames = frames;
+                    if (candidate->columns <= 0 || candidate->rows <= 0) {
+                        auto probe = itk::GDCMImageIO::New();
+                        probe->SetFileName(nativeFile);
+                        probe->ReadImageInformation();
+                        candidate->columns = static_cast<int>(probe->GetDimensions(0));
+                        candidate->rows = static_cast<int>(probe->GetDimensions(1));
+                        candidate->frames = probe->GetNumberOfDimensions() >= 3
+                            ? static_cast<int>(probe->GetDimensions(2)) : candidate->frames;
+                    }
                     candidate->projection = projection;
-                    candidate->unsignedPixels = dicomInteger(dictionary, "0028|0103", 0) == 0;
+                    candidate->unsignedPixels = pixelRepresentation == 0;
                     groupedSeries.insert(groupKey, candidate);
                 }
                 candidate->instances.push_back({filePath,
-                    dicomInteger(dictionary, "0020|0013", 0),
-                    dicomNumber(dictionary, "0020|0032",
-                                std::numeric_limits<double>::quiet_NaN())});
+                    scannedInt(nativeFile, 0x0020, 0x0013, 0),
+                    scannedNumber(nativeFile, 0x0020, 0x0032,
+                                  std::numeric_limits<double>::quiet_NaN())});
             } catch (const itk::ExceptionObject &) {
                 // Vendor folders often contain non-image DICOM metadata files.
             } catch (const std::exception &) {
@@ -501,7 +603,6 @@ std::shared_ptr<VolumeSnapshot> readCandidateSnapshot(
     auto imageIO = itk::GDCMImageIO::New();
     const QString firstPath = candidate.instances.front().path;
     imageIO->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
-    imageIO->ReadImageInformation();
 
     if (sourceFiles) {
         sourceFiles->clear();
@@ -521,7 +622,7 @@ std::shared_ptr<VolumeSnapshot> readCandidateSnapshot(
         reader->Update();
         return snapshotFrom3D(reader->GetOutput());
     }
-    if (imageIO->GetNumberOfDimensions() >= 3 && imageIO->GetDimensions(2) > 1) {
+    if (candidate.frames > 1) {
         auto reader = itk::ImageFileReader<Image3D>::New();
         reader->SetImageIO(imageIO);
         reader->SetFileName(QDir::toNativeSeparators(firstPath).toStdString());
@@ -675,6 +776,8 @@ SegmentationResult thresholdSegmentation(
 {
     SegmentationResult result;
     result.method = QStringLiteral("阈值分割");
+    result.lower = lower;
+    result.upper = upper;
     try {
         using Filter = itk::BinaryThresholdImageFilter<Image3D, MaskImage>;
         auto filter = Filter::New();
@@ -710,24 +813,93 @@ SegmentationResult regionGrowingSegmentation(
     SegmentationResult result;
     result.method = fullyConnected ? QStringLiteral("种子生长（26 邻域）")
                                    : QStringLiteral("种子生长（6 邻域）");
+    result.lower = lower;
+    result.upper = upper;
+    result.seedX = seedX;
+    result.seedY = seedY;
+    result.seedZ = seedZ;
+    result.fullyConnected = fullyConnected;
     try {
-        using Filter = itk::ConnectedThresholdImageFilter<Image3D, MaskImage>;
-        auto filter = Filter::New();
-        filter->SetNumberOfWorkUnits(segmentationWorkUnits());
-        filter->SetInput(itkImageFromSnapshot(*snapshot));
-        filter->SetLower(static_cast<short>(std::clamp(lower, -32768.0, 32767.0)));
-        filter->SetUpper(static_cast<short>(std::clamp(upper, -32768.0, 32767.0)));
-        filter->SetReplaceValue(1);
-        filter->SetConnectivity(fullyConnected ? Filter::FullConnectivity
-                                               : Filter::FaceConnectivity);
-        Image3D::IndexType seed;
-        seed[0] = seedX;
-        seed[1] = seedY;
-        seed[2] = seedZ;
-        filter->SetSeed(seed);
-        filter->Update();
-        result.mask = maskSnapshotFromItk(filter->GetOutput(), *snapshot,
-                                         &result.selectedVoxelCount);
+        const int width = snapshot->dimensions[0];
+        const int height = snapshot->dimensions[1];
+        const int depth = snapshot->dimensions[2];
+        const std::size_t sliceSize = static_cast<std::size_t>(width) * height;
+        const std::size_t voxelCount = sliceSize * depth;
+        const short lowerValue = static_cast<short>(
+            std::clamp(lower, -32768.0, 32767.0));
+        const short upperValue = static_cast<short>(
+            std::clamp(upper, -32768.0, 32767.0));
+
+        auto mask = std::make_shared<MaskSnapshot>();
+        mask->dimensions = snapshot->dimensions;
+        mask->spacing = snapshot->spacing;
+        mask->origin = snapshot->origin;
+        mask->direction = snapshot->direction;
+        // 0 = unseen, 1 = selected, 2 = checked boundary voxel outside range.
+        // Marking rejected neighbours avoids repeatedly testing the same boundary.
+        mask->pixels.assign(voxelCount, 0);
+
+        const std::size_t seed = (static_cast<std::size_t>(seedZ) * height + seedY)
+            * width + seedX;
+        std::vector<std::size_t> pending;
+        pending.reserve(std::min<std::size_t>(voxelCount, 1U << 20));
+        pending.push_back(seed);
+        mask->pixels[seed] = 1;
+
+        const auto visit = [&](std::size_t offset) {
+            unsigned char &state = mask->pixels[offset];
+            if (state != 0)
+                return;
+            const short value = snapshot->pixels[offset];
+            if (value >= lowerValue && value <= upperValue) {
+                state = 1;
+                pending.push_back(offset);
+            } else {
+                state = 2;
+            }
+        };
+
+        while (!pending.empty()) {
+            const std::size_t offset = pending.back();
+            pending.pop_back();
+            ++result.selectedVoxelCount;
+
+            const int z = static_cast<int>(offset / sliceSize);
+            const std::size_t inSlice = offset - static_cast<std::size_t>(z) * sliceSize;
+            const int y = static_cast<int>(inSlice / width);
+            const int x = static_cast<int>(inSlice - static_cast<std::size_t>(y) * width);
+
+            if (!fullyConnected) {
+                if (x > 0) visit(offset - 1);
+                if (x + 1 < width) visit(offset + 1);
+                if (y > 0) visit(offset - width);
+                if (y + 1 < height) visit(offset + width);
+                if (z > 0) visit(offset - sliceSize);
+                if (z + 1 < depth) visit(offset + sliceSize);
+                continue;
+            }
+
+            for (int dz = -1; dz <= 1; ++dz) {
+                const int nz = z + dz;
+                if (nz < 0 || nz >= depth)
+                    continue;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const int ny = y + dy;
+                    if (ny < 0 || ny >= height)
+                        continue;
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int nx = x + dx;
+                        if ((dx == 0 && dy == 0 && dz == 0) || nx < 0 || nx >= width)
+                            continue;
+                        visit((static_cast<std::size_t>(nz) * height + ny) * width + nx);
+                    }
+                }
+            }
+        }
+
+        std::replace(mask->pixels.begin(), mask->pixels.end(),
+                     static_cast<unsigned char>(2), static_cast<unsigned char>(0));
+        result.mask = std::move(mask);
     } catch (const itk::ExceptionObject &error) {
         result.error = QStringLiteral("种子生长失败：%1")
                            .arg(QString::fromUtf8(error.GetDescription()));
@@ -941,9 +1113,60 @@ bool MedicalDataController::setVolumeVisibility(int index, bool visible)
     return true;
 }
 
+bool MedicalDataController::prepareCasePackage(const QString &path, QString *scanPath)
+{
+    m_pendingCasePackageRoot.clear();
+    m_pendingCasePackage.clear();
+    if (!scanPath)
+        return false;
+
+    *scanPath = path;
+    QFileInfo sourceInfo(path);
+    QString packageRoot;
+    if (sourceInfo.isFile() && sourceInfo.fileName().compare(
+            QStringLiteral("case.json"), Qt::CaseInsensitive) == 0) {
+        packageRoot = sourceInfo.absolutePath();
+    } else if (sourceInfo.isDir()) {
+        const QString manifestPath = QDir(path).filePath(QStringLiteral("case.json"));
+        if (QFileInfo::exists(manifestPath))
+            packageRoot = sourceInfo.absoluteFilePath();
+    }
+    if (packageRoot.isEmpty())
+        return true;
+
+    QFile manifestFile(QDir(packageRoot).filePath(QStringLiteral("case.json")));
+    if (!manifestFile.open(QIODevice::ReadOnly)) {
+        setError(QStringLiteral("无法读取病例包清单：%1").arg(manifestFile.errorString()));
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(manifestFile.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        setError(QStringLiteral("病例包清单格式无效：%1").arg(parseError.errorString()));
+        return false;
+    }
+    const QVariantMap manifest = document.object().toVariantMap();
+    if (manifest.value(QStringLiteral("format")).toString()
+            != QStringLiteral("GuangSuo.CT.Case")) {
+        setError(QStringLiteral("所选目录不是本软件导出的病例包。"));
+        return false;
+    }
+    const QString dicomRoot = QDir(packageRoot).filePath(QStringLiteral("dicom"));
+    if (!QFileInfo(dicomRoot).isDir()) {
+        setError(QStringLiteral("病例包缺少 dicom 数据目录。"));
+        return false;
+    }
+    m_pendingCasePackageRoot = packageRoot;
+    m_pendingCasePackage = manifest;
+    *scanPath = dicomRoot;
+    return true;
+}
+
 bool MedicalDataController::importDicom(const QUrl &source)
 {
-    const QString path = QDir::cleanPath(localPath(source));
+    QString path;
+    if (!prepareCasePackage(QDir::cleanPath(localPath(source)), &path))
+        return false;
     setBusy(true);
     m_errorMessage.clear();
     m_statusMessage = QStringLiteral("正在递归扫描 DICOM 文件和序列…");
@@ -969,7 +1192,9 @@ void MedicalDataController::importDicomAsync(const QUrl &source)
 {
     if (m_busy)
         return;
-    const QString path = QDir::cleanPath(localPath(source));
+    QString path;
+    if (!prepareCasePackage(QDir::cleanPath(localPath(source)), &path))
+        return;
     setBusy(true);
     m_statusMessage = QStringLiteral("正在准备扫描医学数据目录…");
     m_errorMessage.clear();
@@ -1030,9 +1255,11 @@ void MedicalDataController::publishSeriesCandidates(
         choice.insert(QStringLiteral("sopClass"), candidate->sopClassName);
         choice.insert(QStringLiteral("imageType"), candidate->imageType);
         choice.insert(QStringLiteral("instanceCount"), instanceCount);
+        const qsizetype depth = candidate->instances.size() > 1
+            ? instanceCount : static_cast<qsizetype>(candidate->frames);
         choice.insert(QStringLiteral("dimensions"), candidate->volume
             ? QStringLiteral("%1 × %2 × %3").arg(candidate->columns)
-                  .arg(candidate->rows).arg(instanceCount)
+                  .arg(candidate->rows).arg(depth)
             : QStringLiteral("%1 × %2").arg(candidate->columns).arg(candidate->rows));
         choice.insert(QStringLiteral("sourceDirectory"),
                       QFileInfo(candidate->instances.front().path).absolutePath());
@@ -1139,6 +1366,74 @@ bool MedicalDataController::commitSeriesLoad(SeriesLoadResult result)
     m_sourcePath = QDir::toNativeSeparators(firstPath);
     installVolume(std::move(result.snapshot), result.sourceFiles,
                   std::move(result.pairSnapshot), result.pairSourceFiles);
+
+    const bool restoringCasePackage = !m_pendingCasePackageRoot.isEmpty();
+    if (!restoringCasePackage) {
+        m_operationHistory.clear();
+        emit operationHistoryChanged();
+    }
+
+    // A case package keeps the segmentation and interaction state alongside
+    // the source DICOM. Restore it only after the decoded volume has become
+    // the active workspace node, so annotation bindings use the new stable id.
+    if (!m_pendingCasePackageRoot.isEmpty()) {
+        const QVariantMap segmentation = m_pendingCasePackage
+            .value(QStringLiteral("segmentation")).toMap();
+        const QString maskRelativePath = segmentation.value(
+            QStringLiteral("maskPath")).toString();
+        const QString maskPath = QDir(m_pendingCasePackageRoot).filePath(maskRelativePath);
+        const qint64 expectedBytes = static_cast<qint64>(m_volume->pixels.size());
+        QFile maskFile(maskPath);
+        if (!maskRelativePath.isEmpty() && maskFile.open(QIODevice::ReadOnly)
+            && maskFile.size() == expectedBytes) {
+            const QByteArray bytes = maskFile.readAll();
+            auto restoredMask = std::make_shared<MaskSnapshot>();
+            restoredMask->dimensions = m_volume->dimensions;
+            restoredMask->spacing = m_volume->spacing;
+            restoredMask->origin = m_volume->origin;
+            restoredMask->direction = m_volume->direction;
+            restoredMask->pixels.assign(reinterpret_cast<const unsigned char *>(bytes.constData()),
+                                        reinterpret_cast<const unsigned char *>(bytes.constData())
+                                            + bytes.size());
+            qint64 selected = 0;
+            for (unsigned char value : restoredMask->pixels)
+                selected += value != 0;
+            {
+                std::lock_guard<std::mutex> guard(m_snapshotMutex);
+                m_mask = std::move(restoredMask);
+            }
+            m_segmentationMethod = segmentation.value(
+                QStringLiteral("method")).toString();
+            m_segmentationVoxelCount = segmentation.value(
+                QStringLiteral("voxelCount")).toLongLong();
+            if (m_segmentationVoxelCount <= 0)
+                m_segmentationVoxelCount = selected;
+            m_segmentationVolumeMl = segmentation.value(
+                QStringLiteral("volumeMl")).toDouble();
+            updateActiveVolumeNode();
+            ++m_segmentationRevision;
+            emit segmentationChanged();
+        }
+        const QVariantMap display = m_pendingCasePackage.value(
+            QStringLiteral("display")).toMap();
+        if (display.contains(QStringLiteral("windowWidth")))
+            m_windowWidth = display.value(QStringLiteral("windowWidth")).toDouble();
+        if (display.contains(QStringLiteral("windowLevel")))
+            m_windowLevel = display.value(QStringLiteral("windowLevel")).toDouble();
+        updateActiveVolumeNode();
+        m_operationHistory = m_pendingCasePackage.value(
+            QStringLiteral("operationHistory")).toList();
+        emit operationHistoryChanged();
+        emit casePackageAnnotationsReady(m_pendingCasePackage.value(
+            QStringLiteral("annotations")).toList());
+        m_pendingCasePackageRoot.clear();
+        m_pendingCasePackage.clear();
+    }
+    recordOperation(QStringLiteral("loadSeries"), {
+        {QStringLiteral("modality"), candidate->modality},
+        {QStringLiteral("seriesDescription"), m_seriesDescription},
+        {QStringLiteral("instanceCount"), candidate->instances.size()},
+        {QStringLiteral("restoredCasePackage"), restoringCasePackage}});
     m_selectedSeriesIndex = result.index;
     emit selectedSeriesIndexChanged();
     m_statusMessage = candidate->projection
@@ -1149,6 +1444,120 @@ bool MedicalDataController::commitSeriesLoad(SeriesLoadResult result)
     emit windowingChanged();
     emit statusChanged();
     setBusy(false);
+    return true;
+}
+
+bool MedicalDataController::exportCasePackage(const QUrl &destination,
+                                              const QVariantList &annotations)
+{
+    const QString destinationPath = localPath(destination);
+    if (m_sourceFiles.isEmpty() || !m_volume) {
+        setError(QStringLiteral("当前数据不是可导出的 DICOM 体数据。"));
+        return false;
+    }
+
+    QDir destinationDir(destinationPath);
+    if (!destinationDir.exists() && !destinationDir.mkpath(QStringLiteral("."))) {
+        setError(QStringLiteral("无法创建病例包导出目录。"));
+        return false;
+    }
+    QString safePatient = m_patientId;
+    safePatient.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_-]+")),
+                        QStringLiteral("_"));
+    if (safePatient.isEmpty())
+        safePatient = QStringLiteral("case");
+    const QString packageNameBase = QStringLiteral("%1_%2")
+        .arg(safePatient, QDateTime::currentDateTime().toString(
+            QStringLiteral("yyyyMMdd_HHmmss")));
+    QString packageName = packageNameBase;
+    int packageSuffix = 2;
+    while (destinationDir.exists(packageName))
+        packageName = QStringLiteral("%1_%2").arg(packageNameBase).arg(packageSuffix++);
+    const QString packagePath = destinationDir.filePath(packageName);
+    QDir packageDir;
+    if (!packageDir.mkpath(QDir(packagePath).filePath(QStringLiteral("dicom")))
+        || !packageDir.mkpath(QDir(packagePath).filePath(QStringLiteral("segmentation")))) {
+        setError(QStringLiteral("无法创建病例包目录结构。"));
+        return false;
+    }
+
+    QDir dicomDir(QDir(packagePath).filePath(QStringLiteral("dicom")));
+    int copied = 0;
+    for (int index = 0; index < m_sourceFiles.size(); ++index) {
+        const QFileInfo source(m_sourceFiles.at(index));
+        const QString targetName = QStringLiteral("%1_%2")
+            .arg(index + 1, 6, 10, QChar(u'0')).arg(source.fileName());
+        if (QFile::copy(source.absoluteFilePath(), dicomDir.filePath(targetName)))
+            ++copied;
+    }
+    if (copied != m_sourceFiles.size()) {
+        setError(QStringLiteral("病例包 DICOM 导出不完整：已复制 %1 / %2 个实例。")
+                     .arg(copied).arg(m_sourceFiles.size()));
+        return false;
+    }
+
+    QJsonObject manifest;
+    manifest.insert(QStringLiteral("format"), QStringLiteral("GuangSuo.CT.Case"));
+    manifest.insert(QStringLiteral("version"), 1);
+    manifest.insert(QStringLiteral("createdAt"), QDateTime::currentDateTimeUtc().toString(
+        Qt::ISODate));
+    manifest.insert(QStringLiteral("patientId"), m_patientId);
+    manifest.insert(QStringLiteral("patientName"), m_patientName);
+    manifest.insert(QStringLiteral("modality"), m_modality);
+    manifest.insert(QStringLiteral("studyDescription"), m_studyDescription);
+    manifest.insert(QStringLiteral("seriesDescription"), m_seriesDescription);
+    manifest.insert(QStringLiteral("sourceInstanceCount"), m_sourceFiles.size());
+    QJsonObject display;
+    display.insert(QStringLiteral("windowWidth"), m_windowWidth);
+    display.insert(QStringLiteral("windowLevel"), m_windowLevel);
+    display.insert(QStringLiteral("dimensions"), QJsonArray::fromVariantList({
+        m_volume->dimensions[0], m_volume->dimensions[1], m_volume->dimensions[2]}));
+    display.insert(QStringLiteral("spacing"), QJsonArray::fromVariantList({
+        m_volume->spacing[0], m_volume->spacing[1], m_volume->spacing[2]}));
+    manifest.insert(QStringLiteral("display"), display);
+
+    if (m_mask && !m_mask->pixels.empty()) {
+        const QString maskPath = QDir(packagePath).filePath(QStringLiteral(
+            "segmentation/mask.raw"));
+        QFile maskFile(maskPath);
+        if (!maskFile.open(QIODevice::WriteOnly)
+            || maskFile.write(reinterpret_cast<const char *>(m_mask->pixels.data()),
+                              static_cast<qint64>(m_mask->pixels.size()))
+                   != static_cast<qint64>(m_mask->pixels.size())) {
+            setError(QStringLiteral("无法写入三维分割掩膜。"));
+            return false;
+        }
+        QJsonObject segmentation;
+        segmentation.insert(QStringLiteral("maskPath"), QStringLiteral("segmentation/mask.raw"));
+        segmentation.insert(QStringLiteral("method"), m_segmentationMethod);
+        segmentation.insert(QStringLiteral("voxelCount"), m_segmentationVoxelCount);
+        segmentation.insert(QStringLiteral("volumeMl"), m_segmentationVolumeMl);
+        segmentation.insert(QStringLiteral("dimensions"), QJsonArray::fromVariantList({
+            m_mask->dimensions[0], m_mask->dimensions[1], m_mask->dimensions[2]}));
+        segmentation.insert(QStringLiteral("spacing"), QJsonArray::fromVariantList({
+            m_mask->spacing[0], m_mask->spacing[1], m_mask->spacing[2]}));
+        manifest.insert(QStringLiteral("segmentation"), segmentation);
+    }
+
+    manifest.insert(QStringLiteral("annotations"), QJsonArray::fromVariantList(annotations));
+    manifest.insert(QStringLiteral("operationHistory"),
+                    QJsonArray::fromVariantList(m_operationHistory));
+    QSaveFile manifestFile(QDir(packagePath).filePath(QStringLiteral("case.json")));
+    if (!manifestFile.open(QIODevice::WriteOnly)
+        || manifestFile.write(QJsonDocument(manifest).toJson(QJsonDocument::Indented)) < 0
+        || !manifestFile.commit()) {
+        setError(QStringLiteral("无法写入病例包清单。"));
+        return false;
+    }
+    recordOperation(QStringLiteral("exportCasePackage"), {
+        {QStringLiteral("path"), packagePath},
+        {QStringLiteral("instances"), copied},
+        {QStringLiteral("hasSegmentation"), m_mask != nullptr},
+        {QStringLiteral("annotationCount"), annotations.size()}});
+    m_statusMessage = QStringLiteral("病例包已导出：%1（含 DICOM、分割、测量和操作记录）")
+                          .arg(packagePath);
+    m_errorMessage.clear();
+    emit statusChanged();
     return true;
 }
 
@@ -1240,6 +1649,7 @@ void MedicalDataController::loadDemoVolume()
     m_windowLevel = 40.0;
     installVolume(std::move(snapshot), {});
     m_statusMessage = QStringLiteral("演示体数据已载入，不得用于临床诊断");
+    recordOperation(QStringLiteral("loadDemoVolume"));
     emit windowingChanged();
     emit statusChanged();
 }
@@ -1310,6 +1720,9 @@ bool MedicalDataController::setRegionGrowingSeed(int seedX, int seedY, int seedZ
     m_errorMessage.clear();
     m_statusMessage = QStringLiteral("种子点已选择：IJK (%1, %2, %3)，%4 HU")
                           .arg(seedX).arg(seedY).arg(seedZ).arg(m_regionGrowingSeedValue);
+    recordOperation(QStringLiteral("setRegionGrowingSeed"), {
+        {QStringLiteral("x"), seedX}, {QStringLiteral("y"), seedY},
+        {QStringLiteral("z"), seedZ}, {QStringLiteral("hu"), m_regionGrowingSeedValue}});
     emit regionGrowingSeedChanged();
     emit statusChanged();
     return true;
@@ -1324,6 +1737,7 @@ void MedicalDataController::clearRegionGrowingSeed()
     m_regionGrowingSeedValid = false;
     m_errorMessage.clear();
     m_statusMessage = QStringLiteral("种子点已清除");
+    recordOperation(QStringLiteral("clearRegionGrowingSeed"));
     emit regionGrowingSeedChanged();
     emit statusChanged();
 }
@@ -1446,6 +1860,19 @@ bool MedicalDataController::commitSegmentation(
     m_segmentationMethod = std::move(result.method);
     m_segmentationVoxelCount = result.selectedVoxelCount;
     m_segmentationVolumeMl = result.selectedVolumeMl;
+    recordOperation(result.method == QStringLiteral("种子生长（26 邻域）")
+                        || result.method == QStringLiteral("种子生长（6 邻域）")
+                    ? QStringLiteral("regionGrowing")
+                    : QStringLiteral("threshold"), {
+        {QStringLiteral("method"), result.method},
+        {QStringLiteral("lowerHU"), result.lower},
+        {QStringLiteral("upperHU"), result.upper},
+        {QStringLiteral("voxelCount"), m_segmentationVoxelCount},
+        {QStringLiteral("volumeMl"), m_segmentationVolumeMl},
+        {QStringLiteral("seedX"), result.seedX},
+        {QStringLiteral("seedY"), result.seedY},
+        {QStringLiteral("seedZ"), result.seedZ},
+        {QStringLiteral("fullyConnected"), result.fullyConnected}});
     updateActiveVolumeNode();
     ++m_segmentationRevision;
     m_statusMessage = QStringLiteral("%1，%2 个体素，约 %3 mL")
@@ -1471,6 +1898,7 @@ void MedicalDataController::clearSegmentation()
     updateActiveVolumeNode();
     ++m_segmentationRevision;
     m_statusMessage = QStringLiteral("分割结果已清除");
+    recordOperation(QStringLiteral("clearSegmentation"));
     emit segmentationChanged();
     emit statusChanged();
 }
@@ -1504,21 +1932,38 @@ double MedicalDataController::estimateDistanceMm(int viewType, double pixelDx, d
 
 void MedicalDataController::setWindowWidth(double value)
 {
-    value = qMax(1.0, value);
-    if (qFuzzyCompare(m_windowWidth, value))
-        return;
-    m_windowWidth = value;
-    updateActiveVolumeNode();
-    emit windowingChanged();
+    setWindowing(value, m_windowLevel);
 }
 
 void MedicalDataController::setWindowLevel(double value)
 {
-    if (qFuzzyCompare(m_windowLevel, value))
+    setWindowing(m_windowWidth, value);
+}
+
+void MedicalDataController::setWindowing(double width, double level)
+{
+    width = qMax(1.0, width);
+    if (qFuzzyCompare(m_windowWidth, width) && qFuzzyCompare(m_windowLevel, level))
         return;
-    m_windowLevel = value;
+    m_windowWidth = width;
+    m_windowLevel = level;
     updateActiveVolumeNode();
     emit windowingChanged();
+}
+
+void MedicalDataController::recordOperation(const QString &type,
+                                             const QVariantMap &parameters)
+{
+    QVariantMap operation = parameters;
+    operation.insert(QStringLiteral("type"), type);
+    operation.insert(QStringLiteral("timestamp"),
+                     QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    m_operationHistory.append(operation);
+    // Keep the package compact and bounded during long interactive sessions.
+    constexpr qsizetype maxHistory = 500;
+    while (m_operationHistory.size() > maxHistory)
+        m_operationHistory.removeFirst();
+    emit operationHistoryChanged();
 }
 
 void MedicalDataController::setBusy(bool busy)

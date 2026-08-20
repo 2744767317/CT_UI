@@ -4,6 +4,10 @@
 #include "src/dicom/medicaldatacontroller.h"
 
 #include <QVariantMap>
+#include <QColor>
+
+#include <atomic>
+#include <cstdint>
 
 #if CT_ENABLE_MEDICAL_BACKEND
 #include <QQuickVTKItem.h>
@@ -27,12 +31,14 @@ class MedicalViewportItem : public MedicalViewportBase
     Q_PROPERTY(bool pairedProjection READ pairedProjection WRITE setPairedProjection NOTIFY pairedProjectionChanged)
     Q_PROPERTY(bool showImage READ showImage WRITE setShowImage NOTIFY showImageChanged)
     Q_PROPERTY(double segmentationOpacity READ segmentationOpacity WRITE setSegmentationOpacity NOTIFY segmentationOpacityChanged)
+    Q_PROPERTY(QColor segmentationColor READ segmentationColor WRITE setSegmentationColor NOTIFY segmentationColorChanged)
     Q_PROPERTY(int rotationQuarterTurns READ rotationQuarterTurns WRITE setRotationQuarterTurns NOTIFY orientationChanged)
     Q_PROPERTY(bool flipHorizontal READ flipHorizontal WRITE setFlipHorizontal NOTIFY orientationChanged)
     Q_PROPERTY(bool flipVertical READ flipVertical WRITE setFlipVertical NOTIFY orientationChanged)
     Q_PROPERTY(double cropMinimum READ cropMinimum WRITE setCropMinimum NOTIFY cropChanged)
     Q_PROPERTY(double cropMaximum READ cropMaximum WRITE setCropMaximum NOTIFY cropChanged)
     Q_PROPERTY(bool showAnnotations READ showAnnotations WRITE setShowAnnotations NOTIFY showAnnotationsChanged)
+    Q_PROPERTY(bool renderEnabled READ renderEnabled WRITE setRenderEnabled NOTIFY renderEnabledChanged)
     Q_PROPERTY(int sliceCount READ sliceCount NOTIFY sliceCountChanged)
 
 public:
@@ -42,7 +48,8 @@ public:
         ChestContrastPreset = 0,
         BonePreset = 1,
         LungPreset = 2,
-        SoftTissuePreset = 3
+        SoftTissuePreset = 3,
+        VascularPreset = 4
     };
     Q_ENUM(VolumePreset)
 
@@ -58,12 +65,14 @@ public:
     bool pairedProjection() const { return m_pairedProjection; }
     bool showImage() const { return m_showImage; }
     double segmentationOpacity() const { return m_segmentationOpacity; }
+    QColor segmentationColor() const { return m_segmentationColor; }
     int rotationQuarterTurns() const { return m_rotationQuarterTurns; }
     bool flipHorizontal() const { return m_flipHorizontal; }
     bool flipVertical() const { return m_flipVertical; }
     double cropMinimum() const { return m_cropMinimum; }
     double cropMaximum() const { return m_cropMaximum; }
     bool showAnnotations() const { return m_showAnnotations; }
+    bool renderEnabled() const { return m_renderEnabled; }
     int sliceCount() const;
 
     void setViewType(ViewType type);
@@ -76,12 +85,14 @@ public:
     void setPairedProjection(bool paired);
     void setShowImage(bool visible);
     void setSegmentationOpacity(double opacity);
+    void setSegmentationColor(const QColor &color);
     void setRotationQuarterTurns(int turns);
     void setFlipHorizontal(bool flipped);
     void setFlipVertical(bool flipped);
     void setCropMinimum(double value);
     void setCropMaximum(double value);
     void setShowAnnotations(bool visible);
+    void setRenderEnabled(bool enabled);
     Q_INVOKABLE void pickVoxel(double itemX, double itemY, bool updateSeed = true);
     /// 按当前切片几何关系同步映射点击到体素（不依赖 VTK PropPicker）。
     Q_INVOKABLE bool mapClickToVoxel(double itemX, double itemY, bool updateSeed = false);
@@ -111,9 +122,11 @@ signals:
     void pairedProjectionChanged();
     void showImageChanged();
     void segmentationOpacityChanged();
+    void segmentationColorChanged();
     void orientationChanged();
     void cropChanged();
     void showAnnotationsChanged();
+    void renderEnabledChanged();
     void sliceCountChanged();
     void voxelPicked(int voxelX, int voxelY, int voxelZ, int hu,
                      double normalizedX, double normalizedY);
@@ -123,6 +136,9 @@ signals:
 private slots:
     void reloadData();
     void updateRenderState();
+    void updateCropState();
+    void updateSliceState();
+    void updateSliceCameraState();
     void syncAnnotationActors();
 
 protected:
@@ -153,11 +169,28 @@ private:
     bool m_pairedProjection = false;
     bool m_showImage = true;
     bool m_showAnnotations = true;
+    bool m_renderEnabled = true;
     double m_segmentationOpacity = 0.72;
+    QColor m_segmentationColor = QColor(QStringLiteral("#F0783C"));
     int m_rotationQuarterTurns = 0;
     bool m_flipHorizontal = false;
     bool m_flipVertical = false;
     double m_viewZoom = 1.0;
     double m_viewPanX = 0.0;
     double m_viewPanY = 0.0;
+    // Each high-frequency state family has its own serial. Older VTK tasks can
+    // exit before touching the pipeline without suppressing an unrelated
+    // change (for example, a crop update must not discard a windowing update).
+    std::shared_ptr<std::atomic<std::uint64_t>> m_renderStateSerial =
+        std::make_shared<std::atomic<std::uint64_t>>(0);
+    std::shared_ptr<std::atomic<std::uint64_t>> m_cropStateSerial =
+        std::make_shared<std::atomic<std::uint64_t>>(0);
+    std::shared_ptr<std::atomic<std::uint64_t>> m_sliceStateSerial =
+        std::make_shared<std::atomic<std::uint64_t>>(0);
+    std::shared_ptr<std::atomic<std::uint64_t>> m_cameraStateSerial =
+        std::make_shared<std::atomic<std::uint64_t>>(0);
+    std::shared_ptr<std::atomic<std::uint64_t>> m_annotationStateSerial =
+        std::make_shared<std::atomic<std::uint64_t>>(0);
+    std::shared_ptr<std::atomic<std::uint64_t>> m_pipelineReloadSerial =
+        std::make_shared<std::atomic<std::uint64_t>>(0);
 };

@@ -454,21 +454,23 @@ double MedicalDataController::estimateDistanceMm(int viewType, double pixelDx, d
 
 void MedicalDataController::setWindowWidth(double value)
 {
-    value = qMax(1.0, value);
-    if (!qFuzzyCompare(value, m_windowWidth)) {
-        m_windowWidth = value;
-        updateActiveVolumeNode();
-        emit windowingChanged();
-    }
+    setWindowing(value, m_windowLevel);
 }
 
 void MedicalDataController::setWindowLevel(double value)
 {
-    if (!qFuzzyCompare(value, m_windowLevel)) {
-        m_windowLevel = value;
-        updateActiveVolumeNode();
-        emit windowingChanged();
-    }
+    setWindowing(m_windowWidth, value);
+}
+
+void MedicalDataController::setWindowing(double width, double level)
+{
+    width = qMax(1.0, width);
+    if (qFuzzyCompare(m_windowWidth, width) && qFuzzyCompare(m_windowLevel, level))
+        return;
+    m_windowWidth = width;
+    m_windowLevel = level;
+    updateActiveVolumeNode();
+    emit windowingChanged();
 }
 
 void MedicalDataController::setBusy(bool busy)

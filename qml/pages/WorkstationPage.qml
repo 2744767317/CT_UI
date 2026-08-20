@@ -20,6 +20,7 @@ Item {
     property bool showImage: true
     property bool showMeasurements: true
     property real segmentationOpacity: 0.72
+    property color segmentationColor: "#F0783C"
 
     function measureToolLabel() {
         if (root.toolModeIndex !== 4)
@@ -332,6 +333,7 @@ Item {
                         showSegmentation: root.showSegmentation
                         showMeasurements: root.showMeasurements
                         segmentationOpacity: root.segmentationOpacity
+                        segmentationColor: root.segmentationColor
                         seedPicking: root.seedPicking
                         seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
                         seedMarkerX: root.seedMarkerX
@@ -362,6 +364,7 @@ Item {
                         showSegmentation: root.showSegmentation
                         showMeasurements: root.showMeasurements
                         segmentationOpacity: root.segmentationOpacity
+                        segmentationColor: root.segmentationColor
                         seedPicking: root.seedPicking
                         seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
                         seedMarkerX: root.seedMarkerX
@@ -392,6 +395,7 @@ Item {
                         showSegmentation: root.showSegmentation
                         showMeasurements: root.showMeasurements
                         segmentationOpacity: root.segmentationOpacity
+                        segmentationColor: root.segmentationColor
                         seedPicking: root.seedPicking
                         seedMarkerVisible: root.seedViewType === viewType && Math.abs(slicePosition - root.seedSlicePosition) < 0.0001
                         seedMarkerX: root.seedMarkerX
@@ -424,6 +428,7 @@ Item {
                         showSegmentation: root.showSegmentation
                         showMeasurements: root.showMeasurements
                         segmentationOpacity: root.segmentationOpacity
+                        segmentationColor: root.segmentationColor
                         cropMinimum: root.cropMinimum
                         cropMaximum: root.cropMaximum
                     }
@@ -438,6 +443,7 @@ Item {
                 mip: root.mip
                 volumePreset: root.volumePreset
                 showSegmentation: root.showSegmentation
+                segmentationColor: root.segmentationColor
                 seedPicking: root.seedPicking
                 cropMinimum: root.cropMinimum
                 cropMaximum: root.cropMaximum
@@ -467,6 +473,7 @@ Item {
                 onVolumePresetRequested: preset => root.volumePreset = preset
                 onSeedPickingRequested: enabled => root.seedPicking = enabled
                 onSegmentationVisibilityRequested: visible => root.showSegmentation = visible
+                onSegmentationColorRequested: color => root.segmentationColor = color
                 onCropRequested: (minimum, maximum) => { root.cropMinimum = minimum; root.cropMaximum = maximum }
                 onRotationRequested: turns => {
                     if (root.activePairedProjection)
@@ -503,7 +510,7 @@ Item {
                 Text { text: medicalData.dimensionsText; color: Theme.textSecondary; font.pixelSize: 12 }
                 Text { text: medicalData.spacingText; color: Theme.textSecondary; font.pixelSize: 12 }
                 Item { Layout.fillWidth: true }
-                Text { text: medicalBackendEnabled ? "VTK / ITK" : "兼容模式"; color: medicalBackendEnabled ? Theme.success : Theme.accent; font.pixelSize: 12 }
+                Text { text: medicalBackendEnabled ? "VTK / ITK / GDCM" : "医学后端未启用"; color: medicalBackendEnabled ? Theme.success : Theme.danger; font.pixelSize: 12 }
             }
         }
     }

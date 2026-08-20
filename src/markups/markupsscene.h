@@ -39,6 +39,10 @@ public:
     QVariantList itemsVariant() const;
     QVariantList activePointsVariant() const;
     QVariantList renderItemsVariant() const;
+    // Restore committed markups from a case-package snapshot. Invalid or
+    // partially formed items are rejected so a damaged package cannot create
+    // an inconsistent scene.
+    bool restoreItems(const QVariantList &items);
 
     bool addWorldPoint(const QVector3D &world, const QString &viewId = {});
     bool finishActive();

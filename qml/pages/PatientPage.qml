@@ -92,7 +92,7 @@ Item {
                                 visible: !medicalBackendEnabled
                                 Layout.fillWidth: true
                                 horizontalAlignment: Text.AlignHCenter
-                                text: "MinGW UI 模式未链接医学库，只能载入演示数据。"
+                                text: "当前构建未启用医学后端，请使用 MSVC 预设重新配置。"
                                 color: Theme.accent
                                 font.pixelSize: 13
                             }

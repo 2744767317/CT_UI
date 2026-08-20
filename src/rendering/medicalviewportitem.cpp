@@ -84,6 +84,11 @@ public:
     vtkSmartPointer<vtkVolumeProperty> volumeProperty;
     vtkSmartPointer<vtkVolume> volumeActor;
     vtkSmartPointer<vtkActor> segmentationActor;
+    int volumeTransferPreset = -1;
+    double volumeTransferWidth = 0.0;
+    double volumeTransferLevel = 0.0;
+    bool volumeTransferMip = false;
+    bool volumeTransferValid = false;
     std::vector<vtkSmartPointer<vtkProp>> annotationProps;
     MarkupsPicker::ImagePresentation imagePresentation;
     std::array<double, 3> sliceCameraCenter {0.0, 0.0, 0.0};
@@ -281,6 +286,22 @@ void applyVolumePreset(ViewportPipeline *pipeline,
         property->SetSpecular(0.0);
         property->SetSpecularPower(1.0);
         break;
+    case MedicalViewportItem::VolumePreset::VascularPreset:
+        pipeline->color->AddRGBPoint(low, 0.0, 0.0, 0.0);
+        pipeline->color->AddRGBPoint(at(0.38), 0.22, 0.04, 0.05);
+        pipeline->color->AddRGBPoint(at(0.55), 0.78, 0.10, 0.12);
+        pipeline->color->AddRGBPoint(at(0.72), 1.0, 0.46, 0.30);
+        pipeline->color->AddRGBPoint(high, 1.0, 0.90, 0.78);
+        pipeline->opacity->AddPoint(low, 0.0);
+        pipeline->opacity->AddPoint(at(0.35), 0.0);
+        pipeline->opacity->AddPoint(at(0.48), 0.10);
+        pipeline->opacity->AddPoint(at(0.68), 0.45);
+        pipeline->opacity->AddPoint(high, 0.62);
+        property->SetAmbient(0.32);
+        property->SetDiffuse(0.82);
+        property->SetSpecular(0.22);
+        property->SetSpecularPower(14.0);
+        break;
     case MedicalViewportItem::VolumePreset::ChestContrastPreset:
     default:
         pipeline->color->AddRGBPoint(low, 0.0, 0.0, 0.0);
@@ -300,7 +321,8 @@ void applyVolumePreset(ViewportPipeline *pipeline,
 void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType type,
                     double slicePosition, double width, double level,
                     bool invertGrayscale, bool showImage, bool showSegmentation,
-                    double segmentationOpacity)
+                    double segmentationOpacity,
+                    const std::array<double, 3> &segmentationColor)
 {
     const int orientation = orientationFor(type);
     const int sliceCount = pipeline->image->GetDimensions()[orientation];
@@ -336,7 +358,8 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
         pipeline->maskLookup->SetNumberOfTableValues(2);
         pipeline->maskLookup->SetRange(0.0, 1.0);
         pipeline->maskLookup->SetTableValue(0, 0.0, 0.0, 0.0, 0.0);
-        pipeline->maskLookup->SetTableValue(1, 0.95, 0.38, 0.08, segmentationOpacity);
+        pipeline->maskLookup->SetTableValue(1, segmentationColor[0], segmentationColor[1],
+                                             segmentationColor[2], segmentationOpacity);
         pipeline->maskLookup->Build();
         pipeline->maskMapper = vtkSmartPointer<vtkImageSliceMapper>::New();
         pipeline->maskMapper->SetInputData(pipeline->mask);
@@ -355,7 +378,8 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
 void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
                      double cropMaximum, MedicalViewportItem::VolumePreset preset,
                      bool showImage, bool showSegmentation, double segmentationOpacity,
-                     double windowWidth, double windowLevel)
+                     double windowWidth, double windowLevel,
+                     const std::array<double, 3> &segmentationColor)
 {
     pipeline->volumeMapper = vtkSmartPointer<vtkGPUVolumeRayCastMapper>::New();
     pipeline->volumeMapper->SetInputData(pipeline->image);
@@ -381,6 +405,11 @@ void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
     pipeline->volumeProperty->SetScalarOpacity(pipeline->opacity);
     pipeline->volumeProperty->SetInterpolationTypeToLinear();
     applyVolumePreset(pipeline, preset, mip, windowWidth, windowLevel);
+    pipeline->volumeTransferPreset = static_cast<int>(preset);
+    pipeline->volumeTransferWidth = windowWidth;
+    pipeline->volumeTransferLevel = windowLevel;
+    pipeline->volumeTransferMip = mip;
+    pipeline->volumeTransferValid = true;
 
     pipeline->volumeActor = vtkSmartPointer<vtkVolume>::New();
     pipeline->volumeActor->SetMapper(pipeline->volumeMapper);
@@ -403,7 +432,9 @@ void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
         pipeline->segmentationActor = vtkSmartPointer<vtkActor>::New();
         pipeline->segmentationActor->SetMapper(mapper);
         pipeline->segmentationActor->SetUserMatrix(pipeline->renderTransform);
-        pipeline->segmentationActor->GetProperty()->SetColor(0.95, 0.38, 0.08);
+        pipeline->segmentationActor->GetProperty()->SetColor(segmentationColor[0],
+                                                              segmentationColor[1],
+                                                              segmentationColor[2]);
         pipeline->segmentationActor->GetProperty()->SetOpacity(segmentationOpacity);
         pipeline->segmentationActor->GetProperty()->SetAmbient(0.34);
         pipeline->segmentationActor->GetProperty()->SetDiffuse(0.66);
@@ -419,8 +450,10 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
                      MedicalViewportItem::ViewType type, double slicePosition,
                      bool mip, MedicalViewportItem::VolumePreset preset,
                      bool projectionData, bool invertGrayscale,
-                     bool showImage, bool showSegmentation,
-                     double segmentationOpacity, int rotationQuarterTurns,
+                      bool showImage, bool showSegmentation,
+                      double segmentationOpacity,
+                      const std::array<double, 3> &segmentationColor,
+                      int rotationQuarterTurns,
                       bool flipHorizontal, bool flipVertical, double cropMinimum,
                       double cropMaximum, double width, double level,
                       const QString &patientOrientation, double viewZoom,
@@ -468,13 +501,16 @@ void rebuildPipeline(ViewportPipeline *pipeline, vtkRenderWindow *renderWindow,
 
     if (type == MedicalViewportItem::ViewType::Volume3D)
         configureVolume(pipeline, mip, cropMinimum, cropMaximum, preset,
-                        showImage, showSegmentation, segmentationOpacity, width, level);
+                        showImage, showSegmentation, segmentationOpacity, width, level,
+                        segmentationColor);
     else
         configureSlice(pipeline, type, slicePosition, width, level, invertGrayscale,
-                       showImage, showSegmentation, segmentationOpacity);
+                       showImage, showSegmentation, segmentationOpacity, segmentationColor);
 
     if (renderWindow->GetInteractor()) {
-        renderWindow->GetInteractor()->SetDesiredUpdateRate(30.0);
+        // The GPU mapper uses this target with auto-adjusted sample distances:
+        // favour 60 FPS while rotating, then return to full still quality.
+        renderWindow->GetInteractor()->SetDesiredUpdateRate(60.0);
         renderWindow->GetInteractor()->SetStillUpdateRate(0.5);
         if (type == MedicalViewportItem::ViewType::Volume3D) {
             vtkNew<vtkInteractorStyleTrackballCamera> style;
@@ -551,23 +587,7 @@ void MedicalViewportItem::geometryChange(const QRectF &newGeometry,
     if (newGeometry.size() == oldGeometry.size() || !m_volume
         || m_viewType == ViewType::Volume3D)
         return;
-    const auto volume = m_volume;
-    const auto type = m_viewType;
-    const double viewportWidth = newGeometry.width();
-    const double viewportHeight = newGeometry.height();
-    const double viewZoom = m_viewZoom;
-    const double viewPanX = m_viewPanX;
-    const double viewPanY = m_viewPanY;
-    dispatch_async([volume, type, viewportWidth, viewportHeight,
-                    viewZoom, viewPanX, viewPanY](
-                       vtkRenderWindow *, vtkUserData userData) {
-        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
-        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
-                       viewZoom, viewPanX, viewPanY);
-        if (pipeline && pipeline->renderer)
-            pipeline->renderer->ResetCameraClippingRange();
-    });
-    scheduleRender();
+    updateSliceCameraState();
 }
 
 QQuickVTKItem::vtkUserData MedicalViewportItem::initializeVTK(vtkRenderWindow *renderWindow)
@@ -596,13 +616,19 @@ QQuickVTKItem::vtkUserData MedicalViewportItem::initializeVTK(vtkRenderWindow *r
         ? (m_pairedProjection ? m_controller->projectionPairOrientation()
                               : m_controller->patientOrientation())
         : QString();
-    rebuildPipeline(pipeline, renderWindow, m_volume, m_mask, m_viewType,
-                     m_slicePosition, m_mip, m_volumePreset, projectionData,
-                    invertGrayscale, m_showImage, m_showSegmentation,
-                     m_segmentationOpacity, m_rotationQuarterTurns,
-                     m_flipHorizontal, m_flipVertical, m_cropMinimum,
-                     m_cropMaximum, width, level, patientOrientation,
-                     m_viewZoom, m_viewPanX, m_viewPanY);
+    const std::array<double, 3> segmentationColor {
+        m_segmentationColor.redF(), m_segmentationColor.greenF(),
+        m_segmentationColor.blueF()};
+    if (m_renderEnabled) {
+        rebuildPipeline(pipeline, renderWindow, m_volume, m_mask, m_viewType,
+                         m_slicePosition, m_mip, m_volumePreset, projectionData,
+                        invertGrayscale, m_showImage, m_showSegmentation,
+                          m_segmentationOpacity, segmentationColor,
+                          m_rotationQuarterTurns,
+                         m_flipHorizontal, m_flipVertical, m_cropMinimum,
+                         m_cropMaximum, width, level, patientOrientation,
+                         m_viewZoom, m_viewPanX, m_viewPanY);
+    }
     return pipeline;
 }
 
@@ -664,6 +690,22 @@ void MedicalViewportItem::setShowAnnotations(bool visible)
     syncAnnotationActors();
 }
 
+void MedicalViewportItem::setRenderEnabled(bool enabled)
+{
+    if (m_renderEnabled == enabled)
+        return;
+    m_renderEnabled = enabled;
+    m_renderStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_cropStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_sliceStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_cameraStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_annotationStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_pipelineReloadSerial->fetch_add(1, std::memory_order_acq_rel);
+    emit renderEnabledChanged();
+    if (m_renderEnabled)
+        reloadData();
+}
+
 void MedicalViewportItem::setSlicePosition(double position)
 {
     position = std::clamp(position, 0.0, 1.0);
@@ -671,7 +713,7 @@ void MedicalViewportItem::setSlicePosition(double position)
         return;
     m_slicePosition = position;
     emit slicePositionChanged();
-    updateRenderState();
+    updateSliceState();
     syncAnnotationActors();
 }
 
@@ -681,7 +723,7 @@ void MedicalViewportItem::setMip(bool mip)
         return;
     m_mip = mip;
     emit mipChanged();
-    reloadData();
+    updateRenderState();
 }
 
 void MedicalViewportItem::setVolumePreset(VolumePreset preset)
@@ -730,6 +772,16 @@ void MedicalViewportItem::setSegmentationOpacity(double opacity)
     updateRenderState();
 }
 
+void MedicalViewportItem::setSegmentationColor(const QColor &color)
+{
+    const QColor normalized = color.isValid() ? color : QColor(QStringLiteral("#F0783C"));
+    if (m_segmentationColor == normalized)
+        return;
+    m_segmentationColor = normalized;
+    emit segmentationColorChanged();
+    updateRenderState();
+}
+
 void MedicalViewportItem::setRotationQuarterTurns(int turns)
 {
     turns = ((turns % 4) + 4) % 4;
@@ -765,7 +817,7 @@ void MedicalViewportItem::setCropMinimum(double value)
         return;
     m_cropMinimum = value;
     emit cropChanged();
-    reloadData();
+    updateCropState();
 }
 
 void MedicalViewportItem::setCropMaximum(double value)
@@ -775,7 +827,7 @@ void MedicalViewportItem::setCropMaximum(double value)
         return;
     m_cropMaximum = value;
     emit cropChanged();
-    reloadData();
+    updateCropState();
 }
 
 bool MedicalViewportItem::mapItemPositionToWorld(double itemX, double itemY,
@@ -1040,22 +1092,7 @@ void MedicalViewportItem::panBy(double deltaX, double deltaY)
         return;
     m_viewPanX += deltaX;
     m_viewPanY += deltaY;
-    const auto volume = m_volume;
-    const auto type = m_viewType;
-    const double viewportWidth = width();
-    const double viewportHeight = height();
-    const double viewZoom = m_viewZoom;
-    const double viewPanX = m_viewPanX;
-    const double viewPanY = m_viewPanY;
-    dispatch_async([volume, type, viewportWidth, viewportHeight,
-                    viewZoom, viewPanX, viewPanY](vtkRenderWindow *, vtkUserData userData) {
-        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
-        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
-                       viewZoom, viewPanX, viewPanY);
-        if (pipeline && pipeline->renderer)
-            pipeline->renderer->ResetCameraClippingRange();
-    });
-    scheduleRender();
+    updateSliceCameraState();
 }
 
 void MedicalViewportItem::zoomBy(double factor, double anchorX, double anchorY)
@@ -1073,23 +1110,7 @@ void MedicalViewportItem::zoomBy(double factor, double anchorX, double anchorY)
     m_viewPanX = (1.0 - ratio) * (anchorX - centerX) + ratio * m_viewPanX;
     m_viewPanY = (1.0 - ratio) * (anchorY - centerY) + ratio * m_viewPanY;
     m_viewZoom = newZoom;
-
-    const auto volume = m_volume;
-    const auto type = m_viewType;
-    const double viewportWidth = width();
-    const double viewportHeight = height();
-    const double viewZoom = m_viewZoom;
-    const double viewPanX = m_viewPanX;
-    const double viewPanY = m_viewPanY;
-    dispatch_async([volume, type, viewportWidth, viewportHeight,
-                    viewZoom, viewPanX, viewPanY](vtkRenderWindow *, vtkUserData userData) {
-        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
-        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
-                       viewZoom, viewPanX, viewPanY);
-        if (pipeline && pipeline->renderer)
-            pipeline->renderer->ResetCameraClippingRange();
-    });
-    scheduleRender();
+    updateSliceCameraState();
 }
 
 void MedicalViewportItem::resetView()
@@ -1099,23 +1120,16 @@ void MedicalViewportItem::resetView()
     m_viewZoom = 1.0;
     m_viewPanX = 0.0;
     m_viewPanY = 0.0;
-    const auto volume = m_volume;
-    const auto type = m_viewType;
-    const double viewportWidth = width();
-    const double viewportHeight = height();
-    dispatch_async([volume, type, viewportWidth, viewportHeight](
-                       vtkRenderWindow *, vtkUserData userData) {
-        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
-        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
-                       1.0, 0.0, 0.0);
-        if (pipeline && pipeline->renderer)
-            pipeline->renderer->ResetCameraClippingRange();
-    });
-    scheduleRender();
+    updateSliceCameraState();
 }
 
 void MedicalViewportItem::syncAnnotationActors()
 {
+    if (!m_renderEnabled)
+        return;
+    const auto annotationStateSerial = m_annotationStateSerial;
+    const std::uint64_t serial = annotationStateSerial->fetch_add(
+        1, std::memory_order_acq_rel) + 1;
     const QVariantList items = (m_annotations && m_showAnnotations)
         ? m_annotations->renderItems()
         : QVariantList {};
@@ -1130,8 +1144,10 @@ void MedicalViewportItem::syncAnnotationActors()
         : QString();
 
     dispatch_async([items, volume, show, viewType, slicePosition, is3d,
-                    annotationViewId](
+                    annotationViewId, serial, annotationStateSerial](
                        vtkRenderWindow *, vtkUserData userData) {
+        if (serial != annotationStateSerial->load(std::memory_order_acquire))
+            return;
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (!pipeline || !pipeline->renderer)
             return;
@@ -1493,6 +1509,18 @@ void MedicalViewportItem::syncAnnotationActors()
 
 void MedicalViewportItem::reloadData()
 {
+    // A full pipeline rebuild supersedes lightweight state updates that may
+    // still be queued from a rapid slider drag.
+    m_renderStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_cropStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_sliceStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_cameraStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    m_annotationStateSerial->fetch_add(1, std::memory_order_acq_rel);
+    const auto pipelineReloadSerial = m_pipelineReloadSerial;
+    const std::uint64_t reloadSerial = pipelineReloadSerial->fetch_add(
+        1, std::memory_order_acq_rel) + 1;
+    if (!m_renderEnabled)
+        return;
     const auto nextVolume = m_controller
         ? (m_pairedProjection ? m_controller->projectionPairSnapshot()
                               : m_controller->volumeSnapshot())
@@ -1519,6 +1547,9 @@ void MedicalViewportItem::reloadData()
     const bool showImage = m_showImage;
     const bool segmentation = m_showSegmentation;
     const double segmentationOpacity = m_segmentationOpacity;
+    const std::array<double, 3> segmentationColor {
+        m_segmentationColor.redF(), m_segmentationColor.greenF(),
+        m_segmentationColor.blueF()};
     const int rotationQuarterTurns = m_rotationQuarterTurns;
     const bool flipHorizontal = m_flipHorizontal;
     const bool flipVertical = m_flipVertical;
@@ -1536,16 +1567,18 @@ void MedicalViewportItem::reloadData()
     // Lambda 只捕获不可变快照和值类型，避免渲染线程读取 GUI 对象的可变成员。
     dispatch_async([volume, mask, type, slice, mipMode, preset, projectionData,
                     invertGrayscale,
-                    showImage, segmentation, segmentationOpacity,
+                    showImage, segmentation, segmentationOpacity, segmentationColor,
                     rotationQuarterTurns, flipHorizontal, flipVertical,
                     cropMin, cropMax, width, level, patientOrientation,
-                    viewZoom, viewPanX, viewPanY](vtkRenderWindow *window,
-                                                   vtkUserData userData) {
+                    viewZoom, viewPanX, viewPanY, reloadSerial,
+                    pipelineReloadSerial](vtkRenderWindow *window, vtkUserData userData) {
+        if (reloadSerial != pipelineReloadSerial->load(std::memory_order_acquire))
+            return;
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (pipeline)
             rebuildPipeline(pipeline, window, volume, mask, type, slice, mipMode, preset,
                             projectionData, invertGrayscale, showImage, segmentation,
-                            segmentationOpacity,
+                             segmentationOpacity, segmentationColor,
                             rotationQuarterTurns, flipHorizontal, flipVertical,
                             cropMin, cropMax, width, level, patientOrientation,
                             viewZoom, viewPanX, viewPanY);
@@ -1556,22 +1589,31 @@ void MedicalViewportItem::reloadData()
 
 void MedicalViewportItem::updateRenderState()
 {
+    if (!m_renderEnabled)
+        return;
+    const auto renderStateSerial = m_renderStateSerial;
+    const std::uint64_t serial = renderStateSerial->fetch_add(
+        1, std::memory_order_acq_rel) + 1;
     const int orientation = orientationFor(m_viewType);
     const double slicePosition = m_slicePosition;
     const bool showImage = m_showImage;
     const bool segmentation = m_showSegmentation;
     const double segmentationOpacity = m_segmentationOpacity;
+    const std::array<double, 3> segmentationColor {
+        m_segmentationColor.redF(), m_segmentationColor.greenF(),
+        m_segmentationColor.blueF()};
     const bool mipMode = m_mip;
     const auto preset = m_volumePreset;
-    const double cropMin = m_cropMinimum;
-    const double cropMax = m_cropMaximum;
     const double width = m_controller ? m_controller->windowWidth() : 400.0;
     const double level = m_controller ? m_controller->windowLevel() : 40.0;
     dispatch_async([orientation, slicePosition, showImage, segmentation,
-                    segmentationOpacity, mipMode, preset, cropMin, cropMax,
-                    width, level](vtkRenderWindow *, vtkUserData userData) {
+                    segmentationOpacity, segmentationColor, mipMode, preset,
+                    width, level, serial, renderStateSerial](
+                       vtkRenderWindow *, vtkUserData userData) {
         auto *pipeline = ViewportPipeline::SafeDownCast(userData);
         if (!pipeline)
+            return;
+        if (serial != renderStateSerial->load(std::memory_order_acquire))
             return;
         if (pipeline->sliceMapper && pipeline->image) {
             const int count = pipeline->image->GetDimensions()[orientation];
@@ -1586,14 +1628,18 @@ void MedicalViewportItem::updateRenderState()
         if (pipeline->maskActor)
             pipeline->maskActor->SetVisibility(segmentation);
         if (pipeline->maskLookup) {
-            pipeline->maskLookup->SetTableValue(1, 0.95, 0.38, 0.08,
-                                                 segmentationOpacity);
+            pipeline->maskLookup->SetTableValue(1, segmentationColor[0], segmentationColor[1],
+                                                 segmentationColor[2], segmentationOpacity);
             pipeline->maskLookup->Build();
         }
         if (pipeline->segmentationActor)
             pipeline->segmentationActor->SetVisibility(segmentation);
         if (pipeline->segmentationActor)
             pipeline->segmentationActor->GetProperty()->SetOpacity(segmentationOpacity);
+        if (pipeline->segmentationActor)
+            pipeline->segmentationActor->GetProperty()->SetColor(segmentationColor[0],
+                                                                  segmentationColor[1],
+                                                                  segmentationColor[2]);
         if (pipeline->volumeActor)
             pipeline->volumeActor->SetVisibility(showImage);
         if (pipeline->volumeMapper && pipeline->image) {
@@ -1601,15 +1647,106 @@ void MedicalViewportItem::updateRenderState()
                 pipeline->volumeMapper->SetBlendModeToMaximumIntensity();
             else
                 pipeline->volumeMapper->SetBlendModeToComposite();
-            double bounds[6];
-            pipeline->image->GetBounds(bounds);
-            const double zMin = bounds[4] + (bounds[5] - bounds[4]) * cropMin;
-            const double zMax = bounds[4] + (bounds[5] - bounds[4]) * cropMax;
-            pipeline->volumeMapper->SetCroppingRegionPlanes(
-                bounds[0], bounds[1], bounds[2], bounds[3], zMin, zMax);
-            pipeline->volumeMapper->SetCropping(cropMin > 0.0 || cropMax < 1.0);
-            applyVolumePreset(pipeline, preset, mipMode, width, level);
+            const bool transferChanged = !pipeline->volumeTransferValid
+                || pipeline->volumeTransferPreset != static_cast<int>(preset)
+                || !qFuzzyCompare(pipeline->volumeTransferWidth, width)
+                || !qFuzzyCompare(pipeline->volumeTransferLevel, level)
+                || pipeline->volumeTransferMip != mipMode;
+            if (transferChanged) {
+                applyVolumePreset(pipeline, preset, mipMode, width, level);
+                pipeline->volumeTransferPreset = static_cast<int>(preset);
+                pipeline->volumeTransferWidth = width;
+                pipeline->volumeTransferLevel = level;
+                pipeline->volumeTransferMip = mipMode;
+                pipeline->volumeTransferValid = true;
+            }
         }
+        if (pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
+    });
+    scheduleRender();
+}
+
+void MedicalViewportItem::updateSliceState()
+{
+    if (!m_renderEnabled)
+        return;
+    const auto sliceStateSerial = m_sliceStateSerial;
+    const std::uint64_t serial = sliceStateSerial->fetch_add(
+        1, std::memory_order_acq_rel) + 1;
+    const int orientation = orientationFor(m_viewType);
+    const double slicePosition = m_slicePosition;
+    dispatch_async([orientation, slicePosition, serial, sliceStateSerial](
+                       vtkRenderWindow *, vtkUserData userData) {
+        if (serial != sliceStateSerial->load(std::memory_order_acquire))
+            return;
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        if (!pipeline || !pipeline->sliceMapper || !pipeline->image)
+            return;
+
+        const int count = pipeline->image->GetDimensions()[orientation];
+        const int slice = MarkupsPicker::sliceIndexFromPosition(slicePosition, count);
+        pipeline->sliceMapper->SetSliceNumber(slice);
+        if (pipeline->maskMapper)
+            pipeline->maskMapper->SetSliceNumber(slice);
+        if (pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
+    });
+    scheduleRender();
+}
+
+void MedicalViewportItem::updateSliceCameraState()
+{
+    if (!m_renderEnabled || m_viewType == ViewType::Volume3D || !m_volume)
+        return;
+    const auto cameraStateSerial = m_cameraStateSerial;
+    const std::uint64_t serial = cameraStateSerial->fetch_add(
+        1, std::memory_order_acq_rel) + 1;
+    const auto volume = m_volume;
+    const auto type = m_viewType;
+    const double viewportWidth = width();
+    const double viewportHeight = height();
+    const double viewZoom = m_viewZoom;
+    const double viewPanX = m_viewPanX;
+    const double viewPanY = m_viewPanY;
+    dispatch_async([volume, type, viewportWidth, viewportHeight,
+                    viewZoom, viewPanX, viewPanY, serial, cameraStateSerial](
+                       vtkRenderWindow *, vtkUserData userData) {
+        if (serial != cameraStateSerial->load(std::memory_order_acquire))
+            return;
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        fitSliceCamera(pipeline, type, *volume, viewportWidth, viewportHeight,
+                       viewZoom, viewPanX, viewPanY);
+        if (pipeline && pipeline->renderer)
+            pipeline->renderer->ResetCameraClippingRange();
+    });
+    scheduleRender();
+}
+
+void MedicalViewportItem::updateCropState()
+{
+    if (!m_renderEnabled)
+        return;
+    const auto cropStateSerial = m_cropStateSerial;
+    const std::uint64_t serial = cropStateSerial->fetch_add(
+        1, std::memory_order_acq_rel) + 1;
+    const double cropMin = m_cropMinimum;
+    const double cropMax = m_cropMaximum;
+    dispatch_async([cropMin, cropMax, serial, cropStateSerial](
+                       vtkRenderWindow *, vtkUserData userData) {
+        if (serial != cropStateSerial->load(std::memory_order_acquire))
+            return;
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        if (!pipeline || !pipeline->volumeMapper || !pipeline->image)
+            return;
+
+        double bounds[6];
+        pipeline->image->GetBounds(bounds);
+        const double zMin = bounds[4] + (bounds[5] - bounds[4]) * cropMin;
+        const double zMax = bounds[4] + (bounds[5] - bounds[4]) * cropMax;
+        pipeline->volumeMapper->SetCroppingRegionPlanes(
+            bounds[0], bounds[1], bounds[2], bounds[3], zMin, zMax);
+        pipeline->volumeMapper->SetCropping(cropMin > 0.0 || cropMax < 1.0);
         if (pipeline->renderer)
             pipeline->renderer->ResetCameraClippingRange();
     });

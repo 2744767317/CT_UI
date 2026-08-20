@@ -10,8 +10,10 @@ include(MedicalDependencies)
 include(RuntimeDeployment)
 include(SourceFiles)
 
-if(NOT WIN32 OR (NOT MSVC AND NOT MINGW))
-    message(FATAL_ERROR "CT_UI currently supports Windows MSVC and MinGW toolchains.")
+if(NOT WIN32 OR NOT MSVC OR NOT MSVC_TOOLSET_VERSION STREQUAL "143")
+    message(FATAL_ERROR
+        "CT_UI requires Windows x64 with the MSVC v143 toolchain. "
+        "MinGW and other MSVC toolsets are not supported.")
 endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -37,17 +39,14 @@ find_package(Qt6 6.10 REQUIRED COMPONENTS
     Test
 )
 
-# 该函数根据 CT_ENABLE_MEDICAL_BACKEND 决定是否加载 VTK/ITK/RTK。
-# 外部 SDK 始终从安装目录引用，不会复制到源码仓库。
+# 医学后端是正式程序的固定组成部分；外部 SDK 始终从安装目录引用，
+# 不会复制到源码仓库。项目不再提供 MinGW 或无医学后端的构建分支。
+set(CT_ENABLE_MEDICAL_BACKEND ON CACHE BOOL
+    "Enable the MSVC DICOM, ITK, and VTK medical backend" FORCE)
 ct_configure_medical_dependencies()
 
-if(CT_ENABLE_MEDICAL_BACKEND)
-    set(CT_UI_CORE_BACKEND_SOURCES ${CT_UI_MEDICAL_CORE_SOURCES})
-    set(CT_UI_RENDERING_BACKEND_SOURCES ${CT_UI_MEDICAL_RENDERING_SOURCES})
-else()
-    set(CT_UI_CORE_BACKEND_SOURCES ${CT_UI_COMPATIBILITY_CORE_SOURCES})
-    set(CT_UI_RENDERING_BACKEND_SOURCES ${CT_UI_COMPATIBILITY_RENDERING_SOURCES})
-endif()
+set(CT_UI_CORE_BACKEND_SOURCES ${CT_UI_MEDICAL_CORE_SOURCES})
+set(CT_UI_RENDERING_BACKEND_SOURCES ${CT_UI_MEDICAL_RENDERING_SOURCES})
 
 qt_standard_project_setup(REQUIRES 6.10)
 
@@ -66,8 +65,14 @@ target_link_libraries(CT_UI_core PUBLIC
     Qt6::Gui
     Qt6::Concurrent
 )
-if(CT_ENABLE_MEDICAL_BACKEND)
-    target_link_libraries(CT_UI_core PUBLIC ${ITK_LIBRARIES})
+# The fast metadata scanner uses GDCM's public Scanner API directly;
+# ITKIOGDCM does not expose gdcmCommon transitively in this SDK package.
+target_link_libraries(CT_UI_core PUBLIC ${ITK_LIBRARIES})
+if(TARGET gdcmCommon)
+    target_link_libraries(CT_UI_core PUBLIC gdcmCommon)
+endif()
+if(TARGET gdcmMSFF)
+    target_link_libraries(CT_UI_core PUBLIC gdcmMSFF)
 endif()
 
 qt_add_executable(CT_UI WIN32
@@ -108,15 +113,11 @@ target_link_libraries(CT_UI PRIVATE
     Qt6::Concurrent
 )
 
-if(CT_ENABLE_MEDICAL_BACKEND)
-    target_link_libraries(CT_UI PRIVATE ${VTK_LIBRARIES})
-    vtk_module_autoinit(
-        TARGETS CT_UI
-        MODULES ${VTK_LIBRARIES}
-    )
-else()
-    target_compile_definitions(CT_UI PRIVATE CT_ENABLE_MEDICAL_BACKEND=0)
-endif()
+target_link_libraries(CT_UI PRIVATE ${VTK_LIBRARIES})
+vtk_module_autoinit(
+    TARGETS CT_UI
+    MODULES ${VTK_LIBRARIES}
+)
 
 option(CT_UI_BUILD_TESTS "Configure CT_UI automated test targets" ON)
 if(CT_UI_BUILD_TESTS)
