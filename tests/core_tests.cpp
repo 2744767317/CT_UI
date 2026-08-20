@@ -7,9 +7,13 @@
 #include "src/markups/markupspicker.h"
 #include "src/markups/markupsscene.h"
 
+#include <QByteArray>
+#include <QColor>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QFileInfoList>
+#include <QImage>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QVariantMap>
@@ -18,6 +22,16 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
+
+#if CT_ENABLE_MEDICAL_BACKEND
+#include "src/dicom/secondarycaptureexport.h"
+#include <itkGDCMImageIO.h>
+#include <itkImage.h>
+#include <itkImageFileReader.h>
+#include <itkMetaDataObject.h>
+#include <itkRGBPixel.h>
+#endif
 
 class CoreTests final : public QObject
 {
@@ -40,11 +54,13 @@ private slots:
     void projectionPresentationPolarityIsDetected();
     void dicomTextCharacterSetsAndDamagedLabels();
     void regionGrowingSeedStateAndValidation();
+    void multiLabelSegmentationKeepsIndependentRegions();
     void realDicomRoundTripWhenConfigured();
     void casePackageRoundTripWhenConfigured();
     void recursiveLidcRootLoadsCtAndDx();
     void realLidcRegionGrowingPerformance();
     void mixedRootLoadsUnsignedDx();
+    void volumeRenderCapturePngAndFormatGuards();
 };
 
 void CoreTests::workflowGuardsFutureSteps()
@@ -587,6 +603,56 @@ void CoreTests::regionGrowingSeedStateAndValidation()
     QVERIFY(seedSpy.count() >= 3);
 }
 
+void CoreTests::multiLabelSegmentationKeepsIndependentRegions()
+{
+    MedicalDataController data;
+    data.loadDemoVolume();
+    QCOMPARE(data.currentSegmentationLabel(), 1);
+    QCOMPARE(data.segmentationLabels().size(), 4);
+    QCOMPARE(data.currentSegmentationLabelColor(),
+             QColor::fromRgbF(0.98, 0.45, 0.22));
+
+    data.setCurrentSegmentationLabel(0);
+    QCOMPARE(data.currentSegmentationLabel(), 1);
+    data.setCurrentSegmentationLabel(99);
+    QCOMPARE(data.currentSegmentationLabel(), 4);
+    QCOMPARE(data.currentSegmentationLabelColor(),
+             QColor::fromRgbF(0.80, 0.46, 0.98));
+
+    data.setCurrentSegmentationLabel(2);
+    QVERIFY(data.applyThreshold(40.0, 60.0));
+    auto mask = data.maskSnapshot();
+    QVERIFY(mask);
+    const auto countOf = [](const MaskSnapshot &snapshot, unsigned char label) {
+        return std::count(snapshot.pixels.cbegin(), snapshot.pixels.cend(), label);
+    };
+    QVERIFY(countOf(*mask, 2) > 0);
+    QCOMPARE(countOf(*mask, 1), static_cast<std::ptrdiff_t>(0));
+
+    data.setCurrentSegmentationLabel(1);
+    QVERIFY(data.applyThreshold(-1100.0, -900.0));
+    mask = data.maskSnapshot();
+    QVERIFY(countOf(*mask, 1) > 0);
+    QVERIFY(countOf(*mask, 2) > 0);
+
+    data.setCurrentSegmentationLabel(2);
+    QVERIFY(data.applyThreshold(40.0, 60.0));
+    mask = data.maskSnapshot();
+    QVERIFY(countOf(*mask, 1) > 0);
+    QVERIFY(countOf(*mask, 2) > 0);
+
+    data.setCurrentSegmentationLabel(3);
+    QVERIFY(data.setRegionGrowingSeed(71, 83, 80));
+    QCOMPARE(data.regionGrowingSeedValue(), -720);
+    QVERIFY(data.applyRegionGrowingFromSeed(-800.0, -600.0));
+    mask = data.maskSnapshot();
+    QVERIFY(countOf(*mask, 1) > 0);
+    QVERIFY(countOf(*mask, 2) > 0);
+    QVERIFY(countOf(*mask, 3) > 0);
+    QCOMPARE(data.currentSegmentationLabelColor(),
+             QColor::fromRgbF(0.20, 0.88, 0.90));
+}
+
 void CoreTests::realDicomRoundTripWhenConfigured()
 {
 #if CT_ENABLE_MEDICAL_BACKEND
@@ -870,6 +936,66 @@ void CoreTests::mixedRootLoadsUnsignedDx()
     QVERIFY2(data.exportDicomCopy(QUrl::fromLocalFile(exportDirectory.path())),
              qPrintable(data.errorMessage()));
     QCOMPARE(QDir(exportDirectory.path()).entryList(QDir::Files).size(), 1);
+#else
+    QSKIP("The MinGW UI compatibility build does not link the medical backend.");
+#endif
+}
+
+void CoreTests::volumeRenderCapturePngAndFormatGuards()
+{
+#if CT_ENABLE_MEDICAL_BACKEND
+    const int width = 8;
+    const int height = 6;
+    QByteArray rgb(width * height * 3, '\0');
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int index = (y * width + x) * 3;
+            rgb[index] = static_cast<char>(x * 30);
+            rgb[index + 1] = static_cast<char>(y * 40);
+            rgb[index + 2] = static_cast<char>(128);
+        }
+    }
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString pngPath = directory.filePath(QStringLiteral("volume-render.png"));
+    QString error;
+    QVERIFY2(writeRgbPng(pngPath, rgb, width, height, &error), qPrintable(error));
+    QVERIFY(QFileInfo(pngPath).size() > 0);
+
+    QImage loaded(pngPath);
+    QVERIFY(!loaded.isNull());
+    QCOMPARE(loaded.width(), width);
+    QCOMPARE(loaded.height(), height);
+    const QColor first = loaded.pixelColor(0, 0);
+    QCOMPARE(first.red(), 0);
+    QCOMPARE(first.green(), 0);
+    QCOMPARE(first.blue(), 128);
+
+    QVERIFY(!writeRgbPng(pngPath, QByteArrayLiteral("short"), width, height, &error));
+    QVERIFY(!error.isEmpty());
+
+    MedicalDataController data;
+    data.loadDemoVolume();
+    QVERIFY(data.volumeData());
+    const QString controllerPng = directory.filePath(QStringLiteral("from-controller.png"));
+    QVERIFY2(data.exportVolumeRenderCapture(QUrl::fromLocalFile(controllerPng), rgb, width, height,
+                                            false),
+             qPrintable(data.errorMessage()));
+    QVERIFY(QFileInfo(controllerPng).size() > 0);
+    QCOMPARE(data.statusMessage(), QStringLiteral("已导出 3D 渲染 PNG"));
+
+    const QString controllerDcm = directory.filePath(QStringLiteral("from-controller.dcm"));
+    QVERIFY2(data.exportVolumeRenderCapture(QUrl::fromLocalFile(controllerDcm), rgb, width, height,
+                                            false),
+             qPrintable(data.errorMessage()));
+    QVERIFY(QFileInfo(controllerDcm).size() > 0);
+    QCOMPARE(data.statusMessage(), QStringLiteral("已导出 3D 渲染 Secondary Capture DICOM"));
+
+    const QString unknownPath = directory.filePath(QStringLiteral("volume-render.txt"));
+    QVERIFY(!data.exportVolumeRenderCapture(QUrl::fromLocalFile(unknownPath), rgb, width, height,
+                                            false));
+    QVERIFY(data.errorMessage().contains(QStringLiteral("不支持的导出格式")));
 #else
     QSKIP("The MinGW UI compatibility build does not link the medical backend.");
 #endif

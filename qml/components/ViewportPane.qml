@@ -74,6 +74,10 @@ Rectangle {
         sliceSlider.value = next / last
     }
 
+    function captureRgbPacked(magnification, fitEntireVolume, includeAnnotations) {
+        return viewport.captureRgbPacked(magnification, fitEntireVolume, includeAnnotations)
+    }
+
     function setSliceFromVoxel(voxelX, voxelY, voxelZ) {
         if (root.sliceCount <= 1 || root.viewType === MedicalViewport.Volume3D)
             return

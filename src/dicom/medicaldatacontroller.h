@@ -1,5 +1,9 @@
 #pragma once
 
+#include "segmentationlabels.h"
+
+#include <QByteArray>
+#include <QColor>
 #include <QObject>
 #include <QString>
 #include <QUrl>
@@ -21,7 +25,7 @@ struct VolumeSnapshot
     std::vector<short> pixels;
 };
 
-// 分割结果与源 Volume 保持相同几何信息，像素值 0/1 表示背景和前景。
+// 分割结果与源 Volume 保持相同几何信息；0 为背景，1–4 为独立标签。
 struct MaskSnapshot
 {
     std::array<int, 3> dimensions {0, 0, 0};
@@ -90,6 +94,9 @@ class MedicalDataController final : public QObject
     Q_PROPERTY(int selectedVolumeIndex READ selectedVolumeIndex NOTIFY volumeNodesChanged)
     Q_PROPERTY(bool activeVolumeVisible READ activeVolumeVisible NOTIFY volumeNodesChanged)
     Q_PROPERTY(QVariantList operationHistory READ operationHistory NOTIFY operationHistoryChanged)
+    Q_PROPERTY(int currentSegmentationLabel READ currentSegmentationLabel WRITE setCurrentSegmentationLabel NOTIFY currentSegmentationLabelChanged)
+    Q_PROPERTY(QColor currentSegmentationLabelColor READ currentSegmentationLabelColor NOTIFY currentSegmentationLabelChanged)
+    Q_PROPERTY(QVariantList segmentationLabels READ segmentationLabels CONSTANT)
 
 public:
     explicit MedicalDataController(QObject *parent = nullptr);
@@ -143,6 +150,24 @@ public:
     int selectedVolumeIndex() const { return m_selectedVolumeIndex; }
     bool activeVolumeVisible() const;
     QVariantList operationHistory() const { return m_operationHistory; }
+    int currentSegmentationLabel() const { return m_currentSegmentationLabel; }
+    QColor currentSegmentationLabelColor() const
+    {
+        const auto &entry = SegmentationLabels::entry(m_currentSegmentationLabel);
+        return QColor::fromRgbF(entry.r, entry.g, entry.b);
+    }
+    QVariantList segmentationLabels() const
+    {
+        QVariantList list;
+        for (const auto &entry : SegmentationLabels::kEntries) {
+            QVariantMap item;
+            item.insert(QStringLiteral("id"), static_cast<int>(entry.id));
+            item.insert(QStringLiteral("name"), QString::fromUtf8(entry.name));
+            item.insert(QStringLiteral("color"), QColor::fromRgbF(entry.r, entry.g, entry.b));
+            list.push_back(item);
+        }
+        return list;
+    }
 
     std::shared_ptr<const VolumeSnapshot> volumeSnapshot() const;
     std::shared_ptr<const VolumeSnapshot> projectionPairSnapshot() const;
@@ -161,6 +186,21 @@ public:
     Q_INVOKABLE bool exportDicomCopy(const QUrl &destination);
     Q_INVOKABLE bool exportCasePackage(const QUrl &destination,
                                        const QVariantList &annotations);
+    Q_INVOKABLE bool exportSecondaryCapture(const QUrl &destination,
+                                            const QByteArray &rgbPackedTopLeft,
+                                            int width, int height,
+                                            bool includeAnnotations = false);
+    Q_INVOKABLE bool exportVolumeRenderCapture(const QUrl &destination,
+                                               const QByteArray &rgbPackedTopLeft,
+                                               int width, int height,
+                                               bool includeAnnotations = false);
+    Q_INVOKABLE void reportError(const QString &message) { setError(message); }
+    Q_INVOKABLE void reportStatus(const QString &message)
+    {
+        m_statusMessage = message;
+        m_errorMessage.clear();
+        emit statusChanged();
+    }
     Q_INVOKABLE void loadDemoVolume();
     Q_INVOKABLE bool applyThreshold(double lower, double upper);
     Q_INVOKABLE void applyThresholdAsync(double lower, double upper);
@@ -182,6 +222,14 @@ public:
 public slots:
     void setWindowWidth(double value);
     void setWindowLevel(double value);
+    void setCurrentSegmentationLabel(int label)
+    {
+        const int clamped = SegmentationLabels::clamp(label);
+        if (m_currentSegmentationLabel == clamped)
+            return;
+        m_currentSegmentationLabel = clamped;
+        emit currentSegmentationLabelChanged();
+    }
 
 signals:
     void dataChanged();
@@ -194,6 +242,7 @@ signals:
     void selectedSeriesIndexChanged();
     void volumeNodesChanged();
     void operationHistoryChanged();
+    void currentSegmentationLabelChanged();
     void casePackageAnnotationsReady(const QVariantList &items);
 
 private:
@@ -235,6 +284,7 @@ private:
     QString m_modality;
     QString m_studyDescription;
     QString m_studyDate;
+    QString m_studyInstanceUid;
     QString m_seriesDescription;
     QString m_projectionViewLabel;
     QString m_projectionPairViewLabel;
@@ -264,4 +314,5 @@ private:
     QVariantList m_operationHistory;
     QString m_pendingCasePackageRoot;
     QVariantMap m_pendingCasePackage;
+    int m_currentSegmentationLabel = SegmentationLabels::SoftTissue;
 };

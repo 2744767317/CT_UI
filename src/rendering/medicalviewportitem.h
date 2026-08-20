@@ -110,6 +110,9 @@ public:
     Q_INVOKABLE void panBy(double deltaX, double deltaY);
     Q_INVOKABLE void zoomBy(double factor, double anchorX, double anchorY);
     Q_INVOKABLE void resetView();
+    Q_INVOKABLE QVariantMap captureRgbPacked(int magnification = 1,
+                                             bool fitEntireVolume = false,
+                                             bool includeAnnotations = true);
 
 signals:
     void viewTypeChanged();

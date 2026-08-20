@@ -77,6 +77,7 @@ endif()
 
 qt_add_executable(CT_UI WIN32
     src/main.cpp
+    ${CT_UI_PLATFORM_SOURCES}
     ${CT_UI_RENDERING_COMMON_SOURCES}
     ${CT_UI_RENDERING_BACKEND_SOURCES}
 )
@@ -112,6 +113,9 @@ target_link_libraries(CT_UI PRIVATE
     Qt6::QuickControls2
     Qt6::Concurrent
 )
+if(WIN32)
+    target_link_libraries(CT_UI PRIVATE ole32 uuid shell32)
+endif()
 
 target_link_libraries(CT_UI PRIVATE ${VTK_LIBRARIES})
 vtk_module_autoinit(

@@ -31,14 +31,18 @@ Rectangle {
     signal flipHorizontalRequested(bool flipped)
     signal flipVerticalRequested(bool flipped)
     signal requestExport()
+    signal requestVolumeRenderExport()
+    property int volumeRenderMagnification: 2
+    property bool volumeRenderFitEntireVolume: false
+    property bool volumeRenderIncludeAnnotations: true
 
     function applySegmentationPreset(index) {
         const presets = [
-            ["", "", "#F0783C"],
-            ["150", "2500", "#F2C078"],
-            ["-150", "250", "#E27D60"],
-            ["-1000", "-400", "#55B7D9"],
-            ["100", "500", "#D85C8B"]
+            ["", "", "#F0783C", 0],
+            ["150", "2500", "#F2C078", 2],
+            ["-150", "250", "#E27D60", 1],
+            ["-1000", "-400", "#55B7D9", 3],
+            ["100", "500", "#D85C8B", 4]
         ]
         const preset = presets[index]
         if (!preset)
@@ -49,6 +53,8 @@ Rectangle {
             growLow.text = preset[0]
             growHigh.text = preset[1]
         }
+        if (preset[3] > 0)
+            medicalData.currentSegmentationLabel = preset[3]
         root.segmentationColorRequested(preset[2])
     }
     color: Theme.panel
@@ -200,6 +206,55 @@ Rectangle {
                     id: segmentationColumn
                     width: parent.width
                     spacing: 10
+                    Text { text: "当前标签"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 6
+                        rowSpacing: 6
+                        Repeater {
+                            model: medicalData.segmentationLabels
+                            delegate: Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: Theme.controlHeight
+                                radius: Theme.radius
+                                color: medicalData.currentSegmentationLabel === modelData.id
+                                       ? modelData.color : Theme.control
+                                border.color: medicalData.currentSegmentationLabel === modelData.id
+                                              ? modelData.color : Theme.border
+                                Row {
+                                    anchors.centerIn: parent
+                                    spacing: 8
+                                    Rectangle {
+                                        visible: medicalData.currentSegmentationLabel !== modelData.id
+                                        width: 10
+                                        height: 10
+                                        radius: 2
+                                        color: modelData.color
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    Text {
+                                        text: modelData.name
+                                        color: medicalData.currentSegmentationLabel === modelData.id
+                                               ? "#16191B" : Theme.text
+                                        font.pixelSize: 13
+                                        font.weight: Font.DemiBold
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: medicalData.currentSegmentationLabel = modelData.id
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: "写入当前标签时会替换该标签的旧区域，其他标签保留。组织预设会同时切换对应标签和 HU 范围。"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
                     Text { text: "分割方法"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
                     ComboBox {
                         Layout.fillWidth: true
@@ -226,7 +281,7 @@ Rectangle {
                             spacing: 10
                             Text {
                                 Layout.fillWidth: true
-                                text: "选择整个体数据中位于 HU 范围内的体素。"
+                                text: "选择整个体数据中位于 HU 范围内的体素，结果写入当前标签。"
                                 color: Theme.textSecondary
                                 font.pixelSize: 13
                                 wrapMode: Text.WordWrap
@@ -350,6 +405,8 @@ Rectangle {
                         model: ["橙色", "骨骼米色", "软组织红", "肺部蓝", "血管玫红"]
                         onActivated: {
                             const colors = ["#F0783C", "#F2C078", "#E27D60", "#55B7D9", "#D85C8B"]
+                            const labels = [1, 2, 1, 3, 4]
+                            medicalData.currentSegmentationLabel = labels[index]
                             root.segmentationColorRequested(colors[index])
                         }
                     }
@@ -414,7 +471,7 @@ Rectangle {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: "拖动 3D 视图旋转，滚轮缩放。分割结果以橙色半透明表面叠加。"
+                        text: "拖动 3D 视图旋转，滚轮缩放。分割按标签以半透明表面叠加：软组织橙红、骨骼金黄、肺部青蓝、其他紫色。"
                         color: Theme.textSecondary
                         font.pixelSize: 13
                         wrapMode: Text.WordWrap
@@ -440,6 +497,41 @@ Rectangle {
                     wrapMode: Text.WordWrap
                 }
                 ActionButton { text: "导出病例包"; primary: true; Layout.fillWidth: true; enabled: medicalData.loaded; onClicked: root.requestExport() }
+                Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
+                Text { text: "3D 视图导出"; color: Theme.text; font.pixelSize: 15; font.weight: Font.DemiBold }
+                Text {
+                    Layout.fillWidth: true
+                    text: "把当前三维窗截成 PNG 或 DICOM Secondary Capture，便于汇报或导入 Slicer。"
+                    color: Theme.textSecondary
+                    font.pixelSize: 13
+                    wrapMode: Text.WordWrap
+                }
+                Text { text: "3D 截图分辨率"; color: Theme.textSecondary; font.pixelSize: 13 }
+                ComboBox {
+                    Layout.fillWidth: true
+                    model: ["1× 视口分辨率", "2×（推荐）", "4×"]
+                    currentIndex: root.volumeRenderMagnification === 1 ? 0
+                                  : (root.volumeRenderMagnification === 4 ? 2 : 1)
+                    onActivated: index => {
+                        root.volumeRenderMagnification = index === 0 ? 1 : (index === 2 ? 4 : 2)
+                    }
+                }
+                CheckBox {
+                    text: "包络整个 Volume"
+                    checked: root.volumeRenderFitEntireVolume
+                    onToggled: root.volumeRenderFitEntireVolume = checked
+                }
+                CheckBox {
+                    text: "包含标注"
+                    checked: root.volumeRenderIncludeAnnotations
+                    onToggled: root.volumeRenderIncludeAnnotations = checked
+                }
+                ActionButton {
+                    text: "导出 3D 视图"
+                    Layout.fillWidth: true
+                    enabled: medicalData.volumeData && !medicalData.busy
+                    onClicked: root.requestVolumeRenderExport()
+                }
                 Item { Layout.fillHeight: true }
             }
         }

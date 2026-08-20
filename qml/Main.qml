@@ -27,7 +27,22 @@ ApplicationWindow {
     function importFolder() { importFolderDialog.open() }
     function importFile() { importFileDialog.open() }
     function exportDicom() { exportFolderDialog.open() }
+    function exportVolumeRender() {
+        const chosen = nativeSaveFileDialog.getSaveFileUrl("导出 3D 视图", "", "png")
+        window.commitVolumeRenderExport(chosen)
+    }
     function chooseSeries() { seriesDialog.open() }
+
+    function commitVolumeRenderExport(chosen) {
+        if (!chosen || chosen.toString() === "")
+            return
+        medicalData.reportStatus("正在导出 3D 视图…")
+        if (!pageLoader.item || typeof pageLoader.item.exportVolumeRenderFromDialog !== "function") {
+            medicalData.reportError("当前不是影像工作站页面，无法导出 3D 视图。")
+            return
+        }
+        pageLoader.item.exportVolumeRenderFromDialog(chosen)
+    }
 
     FolderDialog {
         id: importFolderDialog
@@ -214,6 +229,7 @@ ApplicationWindow {
             onRequestFolderImport: window.importFolder()
             onRequestFileImport: window.importFile()
             onRequestExport: window.exportDicom()
+            onRequestVolumeRenderExport: window.exportVolumeRender()
         }
     }
 

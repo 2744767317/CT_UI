@@ -9,6 +9,7 @@ Item {
     signal requestFolderImport()
     signal requestFileImport()
     signal requestExport()
+    signal requestVolumeRenderExport()
 
     property string toolMode: "浏览"
     property int toolModeIndex: 0
@@ -78,6 +79,24 @@ Item {
         root.seedMarkerY = normalizedY
         root.seedSlicePosition = slicePosition
         root.seedPicking = false
+    }
+
+    function captureVolumeRender() {
+        if (typeof volume3dPane.captureRgbPacked !== "function")
+            return { ok: false, error: "当前布局没有 3D 视口。" }
+        return volume3dPane.captureRgbPacked(
+                    inspector.volumeRenderMagnification,
+                    inspector.volumeRenderFitEntireVolume,
+                    inspector.volumeRenderIncludeAnnotations)
+    }
+
+    function exportVolumeRenderFromDialog(url) {
+        const shot = root.captureVolumeRender()
+        if (!shot || !shot.ok) {
+            medicalData.reportError((shot && shot.error) ? shot.error : "3D 视口截图失败。")
+            return
+        }
+        medicalData.exportVolumeRenderCapture(url, shot.rgb, shot.width, shot.height, false)
     }
 
     function updateLinkedSliceBrowsing(sourceViewType, voxelX, voxelY, voxelZ) {
@@ -410,6 +429,7 @@ Item {
                         onSliceBrowseFinished: root.stopLinkedSliceBrowsing()
                     }
                     ViewportPane {
+                        id: volume3dPane
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         Layout.row: 0
@@ -436,6 +456,7 @@ Item {
             }
 
             InspectorPanel {
+                id: inspector
                 Layout.minimumWidth: 340
                 Layout.preferredWidth: 340
                 Layout.maximumWidth: 340
@@ -494,6 +515,7 @@ Item {
                         root.frontalFlipVertical = flipped
                 }
                 onRequestExport: root.requestExport()
+                onRequestVolumeRenderExport: root.requestVolumeRenderExport()
             }
         }
 

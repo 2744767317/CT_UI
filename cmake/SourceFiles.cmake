@@ -18,6 +18,13 @@ set(CT_UI_CORE_COMMON_SOURCES
     src/dicom/dicomtextcodec.cpp
     src/dicom/dicomtextcodec.h
     src/dicom/medicaldatacontroller.h
+    src/dicom/segmentationlabels.h
+)
+
+# 仅桌面程序使用的 Win32 系统对话框，不进入核心库和测试。
+set(CT_UI_PLATFORM_SOURCES
+    src/application/nativesavefiledialog.cpp
+    src/application/nativesavefiledialog.h
 )
 
 # 渲染层只属于桌面程序，不让核心测试引入 QQuickVTKItem 和 VTK。
@@ -28,6 +35,8 @@ set(CT_UI_RENDERING_COMMON_SOURCES
 # MSVC 医学后端：真实 DICOM/ITK/VTK 实现。
 set(CT_UI_MEDICAL_CORE_SOURCES
     src/dicom/medicaldatacontroller.cpp
+    src/dicom/secondarycaptureexport.cpp
+    src/dicom/secondarycaptureexport.h
 )
 set(CT_UI_MEDICAL_RENDERING_SOURCES
     src/rendering/medicalviewportitem.cpp

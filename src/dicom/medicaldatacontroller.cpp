@@ -2,6 +2,8 @@
 
 #include "dicompresentation.h"
 #include "dicomtextcodec.h"
+#include "secondarycaptureexport.h"
+#include "segmentationlabels.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -92,6 +94,7 @@ struct LoadedVolumeNode
     QString modality;
     QString studyDescription;
     QString studyDate;
+    QString studyInstanceUid;
     QString projectionViewLabel;
     QString projectionPairViewLabel;
     QString patientOrientation;
@@ -189,6 +192,36 @@ using MaskImage = itk::Image<unsigned char, 3>;
 QString localPath(const QUrl &url)
 {
     return url.isLocalFile() ? url.toLocalFile() : url.toString();
+}
+
+std::shared_ptr<MaskSnapshot> mergeLabelRegion(
+    const std::shared_ptr<MaskSnapshot> &existing,
+    const std::shared_ptr<MaskSnapshot> &region,
+    unsigned char label)
+{
+    auto merged = std::make_shared<MaskSnapshot>(*region);
+    if (existing && existing->pixels.size() == region->pixels.size()
+        && existing->dimensions == region->dimensions)
+        merged->pixels = existing->pixels;
+    else
+        merged->pixels.assign(region->pixels.size(), 0);
+    SegmentationLabels::replaceLabelRegion(merged->pixels, region->pixels, label);
+    return merged;
+}
+
+SecondaryCaptureMeta currentCaptureMeta(const MedicalDataController &data,
+                                        const QString &studyInstanceUid)
+{
+    SecondaryCaptureMeta meta;
+    meta.patientName = data.patientName();
+    meta.patientId = data.patientId();
+    meta.patientSex = data.patientSex();
+    meta.patientBirthDate = data.patientBirthDate();
+    meta.studyDescription = data.studyDescription();
+    meta.studyDate = data.studyDate();
+    meta.studyInstanceUid = studyInstanceUid;
+    meta.seriesDescription = QStringLiteral("3D Volume Rendering");
+    return meta;
 }
 
 QString dicomText(const itk::MetaDataDictionary &dictionary, const char *tag)
@@ -1336,6 +1369,7 @@ bool MedicalDataController::commitSeriesLoad(SeriesLoadResult result)
         : candidate->studyDescription;
     m_studyDate = candidate->studyDate.isEmpty() ? QStringLiteral("--")
                                                  : candidate->studyDate;
+    m_studyInstanceUid = candidate->studyUid;
     m_seriesDescription = candidate->seriesDescription.isEmpty()
         ? (candidate->projection ? QStringLiteral("X 线投影")
                                  : QStringLiteral("未命名序列"))
@@ -1556,6 +1590,54 @@ bool MedicalDataController::exportCasePackage(const QUrl &destination,
         {QStringLiteral("annotationCount"), annotations.size()}});
     m_statusMessage = QStringLiteral("病例包已导出：%1（含 DICOM、分割、测量和操作记录）")
                           .arg(packagePath);
+    m_errorMessage.clear();
+    emit statusChanged();
+    return true;
+}
+
+bool MedicalDataController::exportSecondaryCapture(const QUrl &destination,
+                                                   const QByteArray &rgbPackedTopLeft,
+                                                   int width, int height,
+                                                   bool)
+{
+    QString error;
+    if (!writeSecondaryCaptureDicom(localPath(destination), rgbPackedTopLeft, width, height,
+                                    currentCaptureMeta(*this, m_studyInstanceUid), &error)) {
+        setError(error);
+        return false;
+    }
+    m_statusMessage = QStringLiteral("已导出 3D 渲染 Secondary Capture DICOM");
+    m_errorMessage.clear();
+    emit statusChanged();
+    return true;
+}
+
+bool MedicalDataController::exportVolumeRenderCapture(const QUrl &destination,
+                                                      const QByteArray &rgbPackedTopLeft,
+                                                      int width, int height,
+                                                      bool)
+{
+    const QString path = localPath(destination);
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    QString error;
+    if (suffix == QStringLiteral("png")) {
+        if (!writeRgbPng(path, rgbPackedTopLeft, width, height, &error)) {
+            setError(error);
+            return false;
+        }
+        m_statusMessage = QStringLiteral("已导出 3D 渲染 PNG");
+    } else if (suffix == QStringLiteral("dcm") || suffix == QStringLiteral("dicom")) {
+        if (!writeSecondaryCaptureDicom(path, rgbPackedTopLeft, width, height,
+                                        currentCaptureMeta(*this, m_studyInstanceUid),
+                                        &error)) {
+            setError(error);
+            return false;
+        }
+        m_statusMessage = QStringLiteral("已导出 3D 渲染 Secondary Capture DICOM");
+    } else {
+        setError(QStringLiteral("不支持的导出格式。"));
+        return false;
+    }
     m_errorMessage.clear();
     emit statusChanged();
     return true;
@@ -1852,19 +1934,30 @@ bool MedicalDataController::commitSegmentation(
         setError(result.error);
         return false;
     }
+    if (!result.mask) {
+        setBusy(false);
+        setError(QStringLiteral("分割未产生有效掩膜。"));
+        return false;
+    }
 
     {
         std::lock_guard<std::mutex> guard(m_snapshotMutex);
-        m_mask = std::move(result.mask);
+        m_mask = mergeLabelRegion(m_mask, result.mask,
+                                  static_cast<unsigned char>(m_currentSegmentationLabel));
+        m_segmentationVoxelCount = SegmentationLabels::countForeground(m_mask->pixels);
     }
+    const auto snapshot = volumeSnapshot();
+    const double voxelMl = snapshot
+        ? snapshot->spacing[0] * snapshot->spacing[1] * snapshot->spacing[2] / 1000.0
+        : 0.0;
     m_segmentationMethod = std::move(result.method);
-    m_segmentationVoxelCount = result.selectedVoxelCount;
-    m_segmentationVolumeMl = result.selectedVolumeMl;
+    m_segmentationVolumeMl = static_cast<double>(m_segmentationVoxelCount) * voxelMl;
     recordOperation(result.method == QStringLiteral("种子生长（26 邻域）")
                         || result.method == QStringLiteral("种子生长（6 邻域）")
                     ? QStringLiteral("regionGrowing")
                     : QStringLiteral("threshold"), {
         {QStringLiteral("method"), result.method},
+        {QStringLiteral("label"), m_currentSegmentationLabel},
         {QStringLiteral("lowerHU"), result.lower},
         {QStringLiteral("upperHU"), result.upper},
         {QStringLiteral("voxelCount"), m_segmentationVoxelCount},
@@ -2000,6 +2093,7 @@ void MedicalDataController::installVolume(std::shared_ptr<VolumeSnapshot> snapsh
     node->modality = m_modality;
     node->studyDescription = m_studyDescription;
     node->studyDate = m_studyDate;
+    node->studyInstanceUid = m_studyInstanceUid;
     node->projectionViewLabel = m_projectionViewLabel;
     node->projectionPairViewLabel = m_projectionPairViewLabel;
     node->patientOrientation = m_patientOrientation;
@@ -2079,6 +2173,7 @@ void MedicalDataController::activateVolumeNode(int index)
     m_modality = node->modality;
     m_studyDescription = node->studyDescription;
     m_studyDate = node->studyDate;
+    m_studyInstanceUid = node->studyInstanceUid;
     m_seriesDescription = node->name;
     m_projectionViewLabel = node->projectionViewLabel;
     m_projectionPairViewLabel = node->projectionPairViewLabel;
@@ -2143,6 +2238,7 @@ void MedicalDataController::resetMetadata()
     m_modality = QStringLiteral("--");
     m_studyDescription = QStringLiteral("未命名检查");
     m_studyDate = QStringLiteral("--");
+    m_studyInstanceUid.clear();
     m_seriesDescription = QStringLiteral("未命名序列");
     m_projectionViewLabel.clear();
     m_projectionPairViewLabel.clear();

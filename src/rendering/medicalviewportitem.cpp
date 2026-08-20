@@ -1,5 +1,6 @@
 #include "medicalviewportitem.h"
 
+#include "src/dicom/segmentationlabels.h"
 #include "src/markups/markupsmetrics.h"
 #include "src/markups/markupspicker.h"
 
@@ -11,6 +12,7 @@
 #include <vtkCellArray.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkCoordinate.h>
+#include <vtkDiscreteFlyingEdges3D.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
@@ -35,9 +37,9 @@
 #include <vtkProperty.h>
 #include <vtkProperty2D.h>
 #include <vtkPropPicker.h>
+#include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
-#include <vtkRenderer.h>
 #include <vtkShortArray.h>
 #include <vtkSphereSource.h>
 #include <vtkTextActor.h>
@@ -46,11 +48,19 @@
 #include <vtkUnsignedCharArray.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
+#include <vtkWindowToImageFilter.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
+#include <memory>
 #include <vector>
 
+#include <QByteArray>
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QStringList>
 #include <QVariantMap>
 
@@ -96,6 +106,45 @@ public:
 };
 
 vtkStandardNewMacro(ViewportPipeline);
+
+void applySegmentationLookup(vtkLookupTable *lookup, double opacity)
+{
+    lookup->SetNumberOfTableValues(SegmentationLabels::kTableSize);
+    lookup->SetRange(0.0, static_cast<double>(SegmentationLabels::kMaxLabel));
+    lookup->SetTableValue(0, 0.0, 0.0, 0.0, 0.0);
+    for (const auto &entry : SegmentationLabels::kEntries)
+        lookup->SetTableValue(entry.id, entry.r, entry.g, entry.b, opacity);
+    lookup->Build();
+}
+
+void copyVtkRgbTopLeft(vtkImageData *image, QByteArray *rgb, int *width, int *height)
+{
+    int dimensions[3] = {0, 0, 0};
+    image->GetDimensions(dimensions);
+    *width = dimensions[0];
+    *height = dimensions[1];
+    const int components = image->GetNumberOfScalarComponents();
+    if (*width <= 0 || *height <= 0 || components < 3 || !image->GetScalarPointer()) {
+        rgb->clear();
+        return;
+    }
+    rgb->resize(static_cast<qsizetype>(*width) * *height * 3);
+    const auto *source = static_cast<const unsigned char *>(image->GetScalarPointer());
+    for (int y = 0; y < *height; ++y) {
+        const unsigned char *row =
+            source + static_cast<std::size_t>(*height - 1 - y) * (*width) * components;
+        char *destination = rgb->data() + static_cast<std::size_t>(y) * (*width) * 3;
+        if (components == 3) {
+            std::memcpy(destination, row, static_cast<std::size_t>(*width) * 3);
+            continue;
+        }
+        for (int x = 0; x < *width; ++x) {
+            destination[x * 3] = static_cast<char>(row[x * components]);
+            destination[x * 3 + 1] = static_cast<char>(row[x * components + 1]);
+            destination[x * 3 + 2] = static_cast<char>(row[x * components + 2]);
+        }
+    }
+}
 
 vtkSmartPointer<vtkImageData> vtkImageFromVolume(const VolumeSnapshot &snapshot)
 {
@@ -324,6 +373,7 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
                     double segmentationOpacity,
                     const std::array<double, 3> &segmentationColor)
 {
+    Q_UNUSED(segmentationColor);
     const int orientation = orientationFor(type);
     const int sliceCount = pipeline->image->GetDimensions()[orientation];
     const int slice = MarkupsPicker::sliceIndexFromPosition(slicePosition, sliceCount);
@@ -355,12 +405,7 @@ void configureSlice(ViewportPipeline *pipeline, MedicalViewportItem::ViewType ty
 
     if (pipeline->mask) {
         pipeline->maskLookup = vtkSmartPointer<vtkLookupTable>::New();
-        pipeline->maskLookup->SetNumberOfTableValues(2);
-        pipeline->maskLookup->SetRange(0.0, 1.0);
-        pipeline->maskLookup->SetTableValue(0, 0.0, 0.0, 0.0, 0.0);
-        pipeline->maskLookup->SetTableValue(1, segmentationColor[0], segmentationColor[1],
-                                             segmentationColor[2], segmentationOpacity);
-        pipeline->maskLookup->Build();
+        applySegmentationLookup(pipeline->maskLookup, segmentationOpacity);
         pipeline->maskMapper = vtkSmartPointer<vtkImageSliceMapper>::New();
         pipeline->maskMapper->SetInputData(pipeline->mask);
         pipeline->maskMapper->SetOrientation(orientation);
@@ -381,6 +426,7 @@ void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
                      double windowWidth, double windowLevel,
                      const std::array<double, 3> &segmentationColor)
 {
+    Q_UNUSED(segmentationColor);
     pipeline->volumeMapper = vtkSmartPointer<vtkGPUVolumeRayCastMapper>::New();
     pipeline->volumeMapper->SetInputData(pipeline->image);
     pipeline->volumeMapper->SetAutoAdjustSampleDistances(true);
@@ -419,22 +465,24 @@ void configureVolume(ViewportPipeline *pipeline, bool mip, double cropMinimum,
     pipeline->renderer->AddVolume(pipeline->volumeActor);
 
     if (pipeline->mask) {
-        vtkNew<vtkFlyingEdges3D> surface;
+        pipeline->maskLookup = vtkSmartPointer<vtkLookupTable>::New();
+        applySegmentationLookup(pipeline->maskLookup, segmentationOpacity);
+        vtkNew<vtkDiscreteFlyingEdges3D> surface;
         surface->SetInputData(pipeline->mask);
-        surface->SetValue(0, 0.5);
+        surface->GenerateValues(SegmentationLabels::kMaxLabel, 1.0,
+                                static_cast<double>(SegmentationLabels::kMaxLabel));
         surface->ComputeNormalsOn();
         surface->Update();
         auto surfaceData = vtkSmartPointer<vtkPolyData>::New();
         surfaceData->ShallowCopy(surface->GetOutput());
         vtkNew<vtkPolyDataMapper> mapper;
         mapper->SetInputData(surfaceData);
-        mapper->ScalarVisibilityOff();
+        mapper->SetLookupTable(pipeline->maskLookup);
+        mapper->SetScalarRange(0.0, static_cast<double>(SegmentationLabels::kMaxLabel));
+        mapper->ScalarVisibilityOn();
         pipeline->segmentationActor = vtkSmartPointer<vtkActor>::New();
         pipeline->segmentationActor->SetMapper(mapper);
         pipeline->segmentationActor->SetUserMatrix(pipeline->renderTransform);
-        pipeline->segmentationActor->GetProperty()->SetColor(segmentationColor[0],
-                                                              segmentationColor[1],
-                                                              segmentationColor[2]);
         pipeline->segmentationActor->GetProperty()->SetOpacity(segmentationOpacity);
         pipeline->segmentationActor->GetProperty()->SetAmbient(0.34);
         pipeline->segmentationActor->GetProperty()->SetDiffuse(0.66);
@@ -1123,6 +1171,108 @@ void MedicalViewportItem::resetView()
     updateSliceCameraState();
 }
 
+QVariantMap MedicalViewportItem::captureRgbPacked(int magnification,
+                                                  bool fitEntireVolume,
+                                                  bool includeAnnotations)
+{
+    QVariantMap result;
+    result.insert(QStringLiteral("ok"), false);
+    if (!m_renderEnabled) {
+        result.insert(QStringLiteral("error"), QStringLiteral("3D 视口当前不可见，无法截图。"));
+        return result;
+    }
+    const int mag = magnification <= 1 ? 1 : (magnification >= 4 ? 4 : 2);
+    struct CaptureState
+    {
+        QByteArray rgb;
+        int width = 0;
+        int height = 0;
+        QString error;
+        std::atomic<bool> done {false};
+    };
+    auto state = std::make_shared<CaptureState>();
+    dispatch_async([state, mag, fitEntireVolume, includeAnnotations](
+                       vtkRenderWindow *window, vtkUserData userData) {
+        auto *pipeline = ViewportPipeline::SafeDownCast(userData);
+        if (!window || !pipeline || !pipeline->renderer) {
+            state->error = QStringLiteral("3D 视口尚未完成渲染，无法截图。");
+            state->done = true;
+            return;
+        }
+
+        std::vector<int> annotationVisibility;
+        if (!includeAnnotations) {
+            annotationVisibility.reserve(pipeline->annotationProps.size());
+            for (auto &prop : pipeline->annotationProps) {
+                annotationVisibility.push_back(prop ? prop->GetVisibility() : 0);
+                if (prop)
+                    prop->SetVisibility(0);
+            }
+        }
+
+        vtkSmartPointer<vtkCamera> restored;
+        if (fitEntireVolume && pipeline->renderer->GetActiveCamera()) {
+            restored = vtkSmartPointer<vtkCamera>::New();
+            restored->DeepCopy(pipeline->renderer->GetActiveCamera());
+            pipeline->renderer->ResetCamera();
+            pipeline->renderer->ResetCameraClippingRange();
+        }
+
+        const int originalWidth = window->GetSize()[0];
+        const int originalHeight = window->GetSize()[1];
+        if (mag > 1 && originalWidth > 0 && originalHeight > 0)
+            window->SetSize(originalWidth * mag, originalHeight * mag);
+        window->Render();
+        vtkNew<vtkWindowToImageFilter> filter;
+        filter->SetInput(window);
+        filter->SetInputBufferTypeToRGB();
+        filter->ReadFrontBufferOff();
+        filter->Update();
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->DeepCopy(filter->GetOutput());
+        if (mag > 1 && originalWidth > 0 && originalHeight > 0)
+            window->SetSize(originalWidth, originalHeight);
+
+        if (restored && pipeline->renderer->GetActiveCamera()) {
+            pipeline->renderer->GetActiveCamera()->DeepCopy(restored);
+            pipeline->renderer->ResetCameraClippingRange();
+        }
+        if (!includeAnnotations) {
+            for (std::size_t index = 0; index < pipeline->annotationProps.size(); ++index) {
+                if (pipeline->annotationProps[index] && index < annotationVisibility.size())
+                    pipeline->annotationProps[index]->SetVisibility(annotationVisibility[index]);
+            }
+        }
+
+        copyVtkRgbTopLeft(image, &state->rgb, &state->width, &state->height);
+        if (state->rgb.isEmpty())
+            state->error = QStringLiteral("3D 渲染捕获失败：图像数据无效。");
+        state->done = true;
+    });
+    scheduleRender();
+
+    QElapsedTimer timer;
+    timer.start();
+    while (!state->done && timer.elapsed() < 4000)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
+    if (!state->done) {
+        result.insert(QStringLiteral("error"), QStringLiteral("3D 视口截图超时。"));
+        return result;
+    }
+    if (state->rgb.isEmpty()) {
+        result.insert(QStringLiteral("error"),
+                      state->error.isEmpty() ? QStringLiteral("3D 渲染捕获失败。")
+                                             : state->error);
+        return result;
+    }
+    result.insert(QStringLiteral("ok"), true);
+    result.insert(QStringLiteral("rgb"), state->rgb);
+    result.insert(QStringLiteral("width"), state->width);
+    result.insert(QStringLiteral("height"), state->height);
+    return result;
+}
+
 void MedicalViewportItem::syncAnnotationActors()
 {
     if (!m_renderEnabled)
@@ -1627,19 +1777,12 @@ void MedicalViewportItem::updateRenderState()
         }
         if (pipeline->maskActor)
             pipeline->maskActor->SetVisibility(segmentation);
-        if (pipeline->maskLookup) {
-            pipeline->maskLookup->SetTableValue(1, segmentationColor[0], segmentationColor[1],
-                                                 segmentationColor[2], segmentationOpacity);
-            pipeline->maskLookup->Build();
-        }
+        if (pipeline->maskLookup)
+            applySegmentationLookup(pipeline->maskLookup, segmentationOpacity);
         if (pipeline->segmentationActor)
             pipeline->segmentationActor->SetVisibility(segmentation);
         if (pipeline->segmentationActor)
             pipeline->segmentationActor->GetProperty()->SetOpacity(segmentationOpacity);
-        if (pipeline->segmentationActor)
-            pipeline->segmentationActor->GetProperty()->SetColor(segmentationColor[0],
-                                                                  segmentationColor[1],
-                                                                  segmentationColor[2]);
         if (pipeline->volumeActor)
             pipeline->volumeActor->SetVisibility(showImage);
         if (pipeline->volumeMapper && pipeline->image) {

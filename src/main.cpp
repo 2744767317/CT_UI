@@ -1,3 +1,4 @@
+#include "src/application/nativesavefiledialog.h"
 #include "src/annotation/annotationcontroller.h"
 #include "src/application/workflowcontroller.h"
 #include "src/dicom/medicaldatacontroller.h"
@@ -30,6 +31,7 @@ int main(int argc, char *argv[])
     WorkflowController workflow;
     MedicalDataController medicalData;
     AnnotationController annotationController;
+    NativeSaveFileDialog nativeSaveFileDialog;
     annotationController.setMedicalData(&medicalData);
 
     // 命令行入口用于自动化冒烟测试和开发调试，不参与正式患者工作流。
@@ -66,6 +68,8 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty(QStringLiteral("medicalData"), &medicalData);
     engine.rootContext()->setContextProperty(QStringLiteral("annotationController"),
                                              &annotationController);
+    engine.rootContext()->setContextProperty(QStringLiteral("nativeSaveFileDialog"),
+                                             &nativeSaveFileDialog);
     engine.rootContext()->setContextProperty(
         QStringLiteral("medicalBackendEnabled"),
         QVariant::fromValue(static_cast<bool>(CT_ENABLE_MEDICAL_BACKEND)));
