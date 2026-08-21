@@ -347,7 +347,7 @@ Rectangle {
                     Text { text: "分割显示颜色"; color: Theme.text; font.pixelSize: 13; font.weight: Font.DemiBold }
                     ComboBox {
                         Layout.fillWidth: true
-                        model: ["橙色", "骨骼米色", "软组织红", "肺部蓝", "血管玫红"]
+                        model: ["橙色", "米色", "红色", "蓝色", "玫红色"]
                         onActivated: {
                             const colors = ["#F0783C", "#F2C078", "#E27D60", "#55B7D9", "#D85C8B"]
                             root.segmentationColorRequested(colors[index])
@@ -414,7 +414,7 @@ Rectangle {
                     }
                     Text {
                         Layout.fillWidth: true
-                        text: "拖动 3D 视图旋转，滚轮缩放。分割结果以橙色半透明表面叠加。"
+                        text: "拖动 3D 视图旋转，滚轮缩放。分割结果以当前颜色半透明表面叠加。"
                         color: Theme.textSecondary
                         font.pixelSize: 13
                         wrapMode: Text.WordWrap
